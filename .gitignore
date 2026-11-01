@@ -1,0 +1,13 @@
+node_modules/
+data/
+*.db
+*.db-wal
+*.db-shm
+.env
+.env.local
+logs/
+.DS_Store
+*.log
+
+# 本地工作记录（非项目代码）
+.workbuddy/

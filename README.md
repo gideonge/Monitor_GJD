@@ -1,0 +1,295 @@
+# ETF 资金流量监控平台
+
+实时监控 A 股各类 ETF 的主力资金流入流出，按可配置阈值识别「资金量暴增 / 骤减」，并推送带完整上下文的告警。
+
+零第三方依赖：后端使用 Node.js 22 内置 `http` + `node:sqlite`，前端为原生 ES Module，`node server/index.js` 即可运行，无需 `npm install`。
+
+---
+
+## 1. 功能
+
+| 模块 | 说明 |
+| --- | --- |
+| 全市场资金总览 | 覆盖全部 A 股 ETF（当前约 1370 只），展示主力净流入合计、流入/流出家数、成交额、分类聚合 |
+| 资金流排行 | 按主力净额 / 净占比 / 超大单 / 成交额 / 涨跌幅排序，支持关键词、分类、监控池筛选 |
+| 趋势分析 | 单只 ETF 的 60 日日级净流入柱状图 + **最后交易日分时走势与逐分钟成交量**（可切换近 5 个交易日，并标注量能突变分钟），以及盘中累计净流入分时曲线 |
+| 分级采集 | **核心池 1 秒采样、其余标的 60 秒**：国家队常买的 15 只宽基走秒级通道（腾讯批量快照，含外盘/内盘），其余 100+ 只按分钟级轮询，数据量差两个数量级 |
+| 秒级盘口 | 核心池标的展示逐秒价格与「主动净买入额」（外盘−内盘增量 × 现价），可切换近 5 / 10 / 30 分钟 |
+| 阈值规则 | 7 类指标 × 3 种时间框架 × 双向比较 × 三种适用范围，阈值、窗口、冷却、级别全部可配 |
+| 量能突变预警 | 分钟级成交量的「骤增」检测，用同标的近 20 分钟中位量做基线并要求价格同向突破，落库为独立指标 `volume_surge` |
+| 秒级攻势预警 | 核心池的秒级「连续主动扫单」检测：15 秒桶的主动净买入额 + 连续 3 桶确认 + 跨族共振抬级，落库为独立指标 `tick_impulse`；秒级图上同步画出攻势区间 |
+| 告警推送 | 命中规则即落库并通过 SSE 实时推送，告警含 ETF 名称、变动量、触发时间、触发条件 |
+| 告警历史 | 按级别 / 状态 / 时间 / 代码筛选，支持确认与 CSV 导出 |
+| 数据韧性 | 上游限流时自动熔断、使用本地缓存快照，离线仍可用已有数据重算日度告警 |
+
+### 告警长什么样
+
+```
+沪深300ETF华泰柏瑞（510300）5分钟窗口期净流入变动额 +1.23亿，触发条件：5分钟窗口期净流入变动额 大于 3000.0万
+```
+
+结构化字段与文案同步返回：`etfName` / `value`（变动量）/ `triggeredAt`（触发时间）/ `conditionText`（触发条件）。
+
+---
+
+## 2. 快速开始
+
+```bash
+# 要求 Node.js >= 22.5（内置 node:sqlite）
+node -v
+
+# 启动（默认 http://127.0.0.1:8787）
+npm start
+
+# 开发模式（文件变更自动重启）
+npm run dev
+
+# 只同步一次数据，不启动 HTTP 服务（可放计划任务）
+npm run sync
+
+# 运行测试
+npm test
+```
+
+首次启动会自动：建库 → 写入 10 条默认规则 → 拉取全市场 ETF 清单 → 回填 60 日日级资金流 → 采集一轮快照 → 计算日度告警。整个过程约 3–10 秒，页面在服务启动瞬间即可访问（数据随后填入）。
+
+可选：复制 `.env.example` 为 `.env` 覆盖默认配置（**不要提交真实密钥类配置**）。
+
+---
+
+## 3. 配置项
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `PORT` / `HOST` | `8787` / `127.0.0.1` | 监听地址 |
+| `DB_FILE` | `./data/etf-monitor.db` | SQLite 文件位置 |
+| `POLL_INTERVAL_MS` | `60000` | 常规标的的盘中快照轮询间隔（分钟级，最小 5000）；核心池另有秒级通道 |
+| `FAST_TICK_ENABLED` | `true` | 是否开启核心池秒级采集 |
+| `FAST_INTERVAL_MS` | `1000` | 秒级轮询间隔（毫秒，最小 500） |
+| `FAST_TICK_CODES` | 15 只宽基 | 秒级核心池代码，逗号分隔；不在 ETF 清单中的代码自动忽略 |
+| `FAST_MEMORY_SEC` | `1800` | 内存环形缓冲时长，决定秒级视图可回看的秒数 |
+| `FAST_FLUSH_MS` | `5000` | 秒级点批量落库间隔（毫秒） |
+| `FAST_RETENTION_DAYS` | `2` | 秒级数据保留天数（15 只 × 4 小时 ≈ 21 万行/天） |
+| `FAST_TIMEOUT_MS` | `3000` | 秒级请求超时，必须短于轮询间隔 |
+| `UNIVERSE_SIZE` | `120` | 监控池规模（按成交额取前 N 只） |
+| `UNIVERSE_REFRESH_MS` | `600000` | 全市场清单刷新间隔 |
+| `HISTORY_DAYS` | `60` | 日级资金流回填天数 |
+| `INTRADAY_DAYS` | `5` | 分时缓存天数（上游单次最多回带 5 个交易日） |
+| `INTRADAY_BACKFILL_LIMIT` | `20` | 收盘后批量回填分时的标的数量上限 |
+| `SNAPSHOT_RETENTION_DAYS` | `7` | 分时快照保留天数（0 = 永久） |
+| `HTTPS_PROXY` / `HTTP_PROXY` | 读取系统环境变量 | 企业代理上网时自动走 CONNECT 隧道，未设置则直连 |
+| `ALERT_COOLDOWN_SEC` | `1800` | 全局默认冷却时间 |
+| `ALERT_MAX_PER_RULE_PER_CYCLE` | `60` | 单轮单规则告警上限，防止首启动刷屏 |
+| `SURGE_ALERT_ENABLED` | `true` | 是否开启日内量能突变预警 |
+| `SURGE_SCAN_INTERVAL_MS` | `60000` | 盘中扫描间隔（与分钟 K 线粒度对齐） |
+| `SURGE_LIVE_REFRESH_LIMIT` | `40` | 每轮盘中刷新的标的数（轮转覆盖监控池，0 = 只用已有缓存） |
+| `SURGE_REQUIRE_BREAK` | `true` | 要求价格同向突破前 20 分钟极值；关闭后灵敏度升高但方向信息消失 |
+| `SURGE_MIN_AMOUNT` | `3000000` | 单分钟成交额下限（元），过滤地量噪声 |
+| `SURGE_MIN_LEVEL` | `2` | 盘中入库的最低强度等级（1 弱 / 2 中 / 3 强） |
+| `SURGE_LIVE_WINDOW_SEC` | `600` | 事件被视为「实时」的时间窗，超出则按回放处理 |
+| `TICK_IMPULSE_ENABLED` | `true` | 是否开启秒级主动买卖攻势预警（仅核心池） |
+| `TICK_IMPULSE_SCAN_MS` | `5000` | 秒级扫描间隔；比采集（1 秒）粗一档，避免同一批桶被反复判定 |
+| `TICK_IMPULSE_BUCKET_SEC` | `15` | 判定桶宽（秒） |
+| `TICK_IMPULSE_BASELINE_BUCKETS` / `_MIN_BASELINE` | `20` / `6` | 基线取近 5 分钟桶成交额中位数；不足 6 桶不判定 |
+| `TICK_IMPULSE_MIN_SAMPLES` | `3` | 桶内最少有效秒数，地量桶不参与判定 |
+| `TICK_IMPULSE_NET_RATIO` | `0.6` | 相对门槛：桶净买入 / 基线桶成交额中位数 |
+| `TICK_IMPULSE_MIN_NET` | `500000` | 绝对门槛（元/桶），拦住地量标的刷倍数 |
+| `TICK_IMPULSE_Z` | `4` | 稳健 z 下限 |
+| `TICK_IMPULSE_CONFIRM_BUCKETS` | `3` | 连续确认桶数（45 秒）；调到 2 误报约增加 6 倍 |
+| `TICK_IMPULSE_MERGE_GAP_SEC` | `90` | 同一波攻势的事件合并间隔 |
+| `TICK_IMPULSE_RESONANCE_MIN_FAMILIES` | `2` | 跨族共振所需的宽基族数（沪深300 / 中证500 / 科创50 …） |
+| `REQUEST_TIMEOUT_MS` / `UPSTREAM_RETRIES` | `9000` / `2` | 上游超时与重试 |
+| `CORS_ORIGINS` | 本机两个 origin | 显式白名单，生产禁用通配符 |
+
+全部配置在启动时集中校验，非法值直接快速失败。
+
+---
+
+## 4. 指标口径
+
+| 指标 | 时间框架 | 含义 |
+| --- | --- | --- |
+| `main_net` 主力净流入额 | 当日累计 / 日度 | 超大单 + 大单净额 |
+| `main_net_delta` 净流入变动额 | 窗口期 | 窗口内主力净额的增量（判定「急流入 / 急流出」） |
+| `main_net_rate` 净流入速率 | 窗口期 | 增量 / 分钟 |
+| `main_net_ratio` 主力净占比 | 当日累计 | 主力净额 / 成交额 |
+| `super_net` 超大单净流入额 | 当日累计 / 日度 | 超大单净额 |
+| `main_net_vs_avg` 较近 5 日均值差额 | 日度 | 当日 − 前 5 个交易日主力净额均值（判定「放量」） |
+| `volume_surge` 分钟成交量突变 | 当日盘中 | 该分钟成交量 / 同标的同交易时段近 20 分钟中位量。基线不跨午休、用中位数 + MAD 抗极值，并要求价格同向突破前 20 分钟极值 |
+| `tick_impulse` 秒级主动净买入 | 当日盘中 | 一个 15 秒桶内（Δ外盘 − Δ内盘）× 100 × 现价 的累计值，需同时满足：≥ 基线桶成交额的 60%、占本桶成交额 20% 以上、稳健 z ≥ 4、连续 3 桶同向；相邻事件合并成一波，阈值作用于整波累计额 |
+
+规则结构：`指标 × 时间框架 × 比较符(> / <) × 阈值 × 窗口长度 × 适用范围 × 级别 × 冷却`。
+
+默认规则（可在页面内修改或删除）：
+
+1. 5 分钟主力急速流入 / 流出（窗口 300s，±3000 万）
+2. 当日主力净流入 / 净流出超 2 亿
+3. 主力净占比大幅异动（> 15%）
+4. 日度资金流入 / 流出显著放大（较 5 日均值 ±3 亿）
+5. 分钟量能突变（带突破确认，≥ 3 倍基线）
+6. 秒级主动买入 / 卖出攻势（单波累计主动净额 ±3000 万）
+
+`volume_surge` 的阈值是倍数口径（例：`3` 表示 3 倍基线），不是金额；回测结论与参数来源见 [`reports/volume-surge-backtest.md`](reports/volume-surge-backtest.md)。
+`tick_impulse` 的阈值是**一波攻势的累计主动净额**（元），不是单桶峰值——单桶 800 万连续 4 桶（累计 3200 万）和单桶 3200 万的调仓是两件事，用户关心的是前者。参数标定见 [`reports/tick-impulse-design.md`](reports/tick-impulse-design.md)。
+
+---
+
+## 5. 告警机制
+
+- **幂等**：`(rule_id, code, dedupe_key)` 唯一索引。日度规则按交易日去重，窗口规则按「交易日 + 窗口桶」去重，重复评估不会产生重复告警。
+- **冷却**：同规则同 ETF 在 `cooldownSec` 内不再重复告警。
+- **降噪**：窗口指标要求样本跨度 ≥ `min(60s, window/2)`，单点数据不做急流判定。
+- **截断**：单轮单规则按资金绝对量排序，只保留绝对值最大的 N 条（默认 60）。
+- **时间语义**：日度告警的 `triggeredAt` 落在该交易日 15:00，而非「评估时刻」，保证历史时间线真实。
+- **离线兜底**：即便上游不可用，只要库内有日线数据，启动时仍会重算日度告警。
+- **量能突变的三层过滤**：① 算法层（基线倍数 + 稳健 z + 绝对成交额下限 + 短期一致性）；② 规则层（阈值、适用范围、冷却）；③ 入库层（盘中只收中等级以上，收盘回放只收强信号）。弱信号不落库，但仍会在分时图上标注，避免告警页被高频小信号淹没。
+- **量能突变的幂等**：`dedupe_key = v:<tradeDate>:<HH:MM>`，因此每次刷新分时后重新检测整日序列都不会重复入库。
+- **秒级攻势的波次语义**：一次国家队入场会持续 1–5 分钟、中间有几个桶不达标，逐桶告警会炸出十几条。这里先把相邻事件合并成「一波」（间隔 < 90 秒、单波 ≤ 10 分钟），再按整波落库：一波只出一条，`dedupe_key = t:<tradeDate>:<波次起点秒>`，同一波在后续扫描里增长不会重复出条。
+- **秒级攻势的跨标的共振**：同一 120 秒窗口内沪深300 / 中证500 / 科创50 等**不同宽基族**同时出现同向攻势时，强度升一级（三族及以上封顶），并在文案里点明共振标的。单只 5000 万可能是一家机构调仓，三族同时买入只可能是一揽子买入。
+- **秒级攻势的时效取舍**：连续 3 桶确认意味着首个桶要等 45 秒才成立（波次起点仍回溯到真实的第一桶），这是用延迟换信噪比——同样条件下 2 桶确认的误报率是 3 桶的 6 倍以上。
+
+---
+
+## 6. API
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/api/health` | 存活探针 |
+| GET | `/api/ready` | 就绪探针（数据库 / 清单 / 快照 / 历史四项状态） |
+| GET | `/api/meta` | 版本、运行状态、关键配置 |
+| GET | `/api/options` | 指标、时间框架、比较符、分类等枚举（供前端表单） |
+| GET | `/api/overview` | 全市场与监控池总览、Top 流入/流出、分类聚合、告警统计 |
+| GET | `/api/etfs?q=&category=&sort=&dir=&limit=&tracked=` | ETF 列表（含最新资金流） |
+| GET | `/api/etfs/:code` | 单只详情：行情、60 日日线、分时汇总（含 `surge` 量能突变标注）、`fast` 采集分级、盘中净流入序列、相关告警 |
+| GET | `/api/etfs/:code/intraday?date=YYYY-MM-DD&force=1` | 分时行情：默认最后交易日的逐分钟价格与成交量，可指定历史交易日；本地缺失时按需拉取 |
+| GET | `/api/etfs/:code/fast?seconds=600` | 秒级盘口：最近 N 秒逐秒价格与主动净买入额（仅核心池；非核心池返回 `tier=minute` 与空点集）；`impulses` 为同一套参数检出的攻势区间，供图上阴影标注 |
+| GET | `/api/flows/ranking?direction=inflow\|outflow&limit=` | 排行榜 |
+| GET | `/api/flows/categories` | 分类资金流聚合 |
+| POST | `/api/sync` | 手动触发采集 `{ scope: "tick"\|"universe"\|"daily"\|"intraday"\|"surge"\|"fast"\|"impulse" }`（`surge` = 刷新盘中分时 + 扫描量能突变；`fast` = 强制一次秒级采样；`impulse` = 秒级攻势扫描，非交易时段需 `force: true`） |
+| GET | `/api/alerts?limit=&offset=&severity=&acknowledged=&code=&sinceHours=` | 告警历史 |
+| GET | `/api/alerts/summary` | 告警统计与最近记录 |
+| POST | `/api/alerts/:id/ack` | 确认告警 |
+| GET | `/api/rules` | 规则列表 |
+| POST | `/api/rules` | 新建规则 |
+| PATCH | `/api/rules/:id` | 修改规则 |
+| PATCH | `/api/rules/:id/toggle` | 启用 / 停用 |
+| DELETE | `/api/rules/:id` | 删除规则 |
+| GET | `/api/stream` | SSE：`hello` / `alert` / `tick` / `status` 事件 |
+
+错误响应统一为 `{ "error": { "code", "message", "details?", "requestId" } }`，不返回堆栈或内部细节。
+
+---
+
+## 7. 数据源与韧性设计
+
+- **来源**：东方财富公开行情接口
+  - 全市场清单：`push2.eastmoney.com/api/qt/clist/get`（`fs=b:MK0021`，按成交额分页）
+  - 批量快照：`push2.eastmoney.com/api/qt/ulist.np/get`（每批 40 个 secid）
+  - 日级资金流：`push2his.eastmoney.com/api/qt/stock/fflow/kline/get`（`klt=101`）
+  - 分钟级分时：`push2his.eastmoney.com/api/qt/stock/trends2/get`（`ndays<=5`，每日 241 个分钟点）；
+    备用源 `web.ifzq.gtimg.cn/appstock/app/minute/query`（腾讯，仅当日，累计量差分为分钟增量）
+  - 秒级快照：`qt.gtimg.cn/q=sh510300,sz159919,...`（腾讯批量，约 2 KB/15 只，含外盘/内盘与一档盘口）
+- **字段**：主力净流入、超大单、大单、中单、小单、成交额、最新价、涨跌幅、行情时间；
+  分时另含每分钟开高低收、成交量（手）、成交额（元）、累计均价（VWAP）与昨收。
+- **采集策略**：日级历史回填（趋势与基准）+ 盘中快照轮询（自建资金流分时序列）
+  + 收盘后回填最后交易日分时（价格与量能，用户点开详情即时可得）
+  + **核心池秒级采样**（1 秒，仅交易时段）。
+- **为什么分两级**：120 只标的按 1 秒采样是分钟级的 60 倍数据量，而其中绝大多数秒级波动只是做市报价。
+  真正需要秒级判断的是「宽基 ETF 上突然出现的连续大额扫单」——国家队入场恰好只发生在这批标的上。
+  因此秒级通道只覆盖 15 只核心宽基，且单独走腾讯接口，不占用东财的分钟级配额。
+- **代理支持**：Node 内置 `fetch` 不读取 `HTTPS_PROXY`，在代理上网环境会表现为
+  `UND_ERR_CONNECT_TIMEOUT` 而误判为「接口限流」。`server/lib/httpClient.js` 用
+  CONNECT 隧道 + TLS 复用实现零依赖代理支持，未配置代理时自动退化为直连。
+- **上游限流应对**：
+  1. 全市场分页拉取限制 2 并发并留 150ms 间隔；日级回填 3 并发；
+  2. 连续失败 3 次触发的**熔断**（60 秒，按 `push2` / `push2his` 分组，互不牵连）；
+  3. 快照写入时同步更新 `etf` 表冗余字段，重启或断网时 `hydrate()` 直接恢复最近一次成功快照；
+  4. 日级回填 6 小时内不重复请求；分时按「标的 × 交易日」落库后不再重复请求，
+     并按需拉取时做 60 秒单标的节流与全局串行队列（1.2 秒间隔）；
+  5. 前端顶部横幅提示降级状态与数据时效。
+- **不可用即降级而非空白**：页面始终展示「最近一次成功采集」的数据，并明确标注时间。
+
+---
+
+## 8. 目录结构
+
+```
+server/
+  index.js              进程入口：迁移、装配、优雅停机
+  app.js                请求管线：CORS、安全头、错误出口、访问日志
+  config/index.js       环境变量集中解析与启动校验
+  lib/                  errors / logger / http / httpClient（代理支持）/ router / static / validate / time / format / classify / serialize / concurrency
+  db/                   SQLite 连接、迁移执行器、migrations/*.sql
+  providers/            eastmoney.js（数据源适配器 + 分组熔断，分时主源失败自动切腾讯备源）
+                        tencent.js（秒级批量快照 + 独立熔断）
+  repositories/         etf / flow / intraday / alert / rule / state（仅数据访问）
+  services/             market（采集）/ intraday（分时）/ fastTick（秒级通道）/ metric（指标）/ alert（规则引擎）
+                        volumeSurge（分钟量能算法）/ volumeSurgeService（分钟级预警）
+                        tickImpulse（秒级攻势算法 + 跨标的共振）/ tickImpulseService（秒级预警）
+                        query（聚合）/ events
+  controllers/          meta / etf / alert / rule / stream（仅 HTTP 编排，无业务逻辑）
+  routes/index.js       路由表
+  jobs/collector.js     七条独立调度环（tick / fast / impulse / universe / intraday / surge / maintenance）
+web/
+  index.html  styles.css  js/{app,api,charts,format}.js  js/views/{ranking,trend,alerts,rules}.js
+tests/                  metric / alertEngine / intraday / volumeSurge（算法）/ volumeSurgeIntegration（预警链路）
+                        tickImpulse（秒级算法）/ tickImpulseIntegration（秒级预警链路）
+scripts/sync-once.js    一次性同步 CLI
+scripts/backtest-volume-surge.js   分钟量能突变的回测
+scripts/backtest-tick-impulse.js   秒级攻势的参数标定与库内回放
+```
+
+分层约定：控制器不写业务逻辑，服务层不依赖 HTTP 对象，仓储层不开启事务（事务由服务层通过 `withTransaction` 组合）。
+
+---
+
+## 9. 数据模型
+
+| 表 | 说明 |
+| --- | --- |
+| `etf` | ETF 元信息 + 最近一次行情快照冗余（重启即恢复） |
+| `flow_snapshot` | 盘中轮询累积的分时序列，唯一键 `(code, ts)` |
+| `flow_daily` | 日级资金流历史，主键 `(code, trade_date)` |
+| `intraday_bar` | 分钟级分时行情（价格 OHLC / 均价 / 成交量 / 成交额 / 昨收），主键 `(code, trade_date, minute)`，重复回填幂等 |
+| `fast_tick` | 秒级逐秒快照（价格 / 累计量额 / 外盘 / 内盘 / 派生 `amt_delta` `net_delta` / 买一卖一 / 盘口失衡），主键 `(code, ts)`，按 `FAST_RETENTION_DAYS` 清理 |
+| `alert_rule` | 阈值规则 |
+| `alert` | 告警记录，唯一索引 `(rule_id, code, dedupe_key)` 保证幂等 |
+| `app_state` / `app_setting` | 运行时状态与设置 |
+| `schema_migrations` | 迁移版本与校验和（历史迁移被改写会启动失败） |
+
+---
+
+## 10. 测试
+
+```bash
+npm test
+```
+
+覆盖：窗口/日度指标计算（含单点与跨窗口边界）、ETF 分类、金额格式化、比较符与适用范围、触发条件文案、规则引擎命中与跳过、告警去重与冷却、单轮截断排序、分时开高低收汇总、昨收推导（多日与单日）、北京时间换算、收盘判定；量能突变的 U 型量能吸收、地量噪声、午休跨段、台阶式放量、价格突破确认、强度分级，以及预警链路的规则命中、幂等、冷却、等级门槛、范围过滤、回放降级；秒级通道的报文解析、首点基线、逐秒增量、同秒去重、跨日重置、非交易时段跳过、池内外分级、窗口锚定、落库汇总；秒级攻势的分桶与时段边界、连续扫单、单桶尖峰、双边放量、地量倍数、午休断基线、波次合并与时长上限、跨族共振、强度分级，以及秒级预警链路的落库、幂等、门槛、共振抬级、冷却、回放降级。共 85 个用例。
+
+参数标定（不参与 `npm test`，需要单独跑）：
+
+```bash
+node scripts/backtest-tick-impulse.js --seeds=20   # 合成秒级流的误报率 / 检出率
+node scripts/backtest-tick-impulse.js --replay     # 回放库内真实秒级数据
+```
+
+---
+
+## 11. 已知限制
+
+1. **非交易日/非交易时段**不会产生盘中（窗口期）告警，因为快照不变化；日度规则仍会在新交易日回填后触发。
+2. **交易日历**基于「周一至周五 + 交易时段」判断，未接入法定节假日表；节假日会表现为「无新快照、无新日线」的静止状态，不影响数据正确性。
+3. **资金流为主动买卖单估算**（东财口径：按逐笔成交金额分档），并非真实席位资金，仅适合观察与研究。
+4. 上游为第三方公开接口，可能因限流、字段调整而不可用；平台会降级展示缓存数据，长期使用建议替换 `server/providers/eastmoney.js` 为有 SLA 的商业数据源（适配器接口已隔离）。
+5. 单实例部署，事件总线为进程内实现；多实例需替换 `server/services/events.js` 为外部消息通道。
+6. **量能突变的参数由单日横截面回测得出**（2026-10-30，60 只 ETF），未覆盖趋势日、震荡日与极端行情；0.14% 的同向 15 分钟收益也未计冲击成本。它的定位是「资金异动线索」，不是可直接执行的交易信号。
+7. **盘中实时刷新依赖分时备源**：主源（东财）限流时自动切腾讯分钟接口，腾讯只提供最后交易日，因此无法回补更早交易日的分钟数据。
+8. **秒级链路只做了非交易时段的连通性验证**：当前实现按 1 秒轮询腾讯批量快照，单轮 15 只约 230 ms；交易日盘中的稳定性（上游是否限速、断线恢复）需在开盘后观察，可用 `POST /api/sync {"scope":"fast"}` 手动触发核对。
+9. **秒级攻势的门槛来自合成数据标定，不是真实成交回放**：秒级历史行情没有公开来源，首个交易日之前库里只有收盘快照。`scripts/backtest-tick-impulse.js` 用的是「对数正态成交 + AR(1) 订单流方向 + 无方向放量突发 + U 型量能」的合成秒级流，8 种参数组合 × 80 小时噪声样本给出误报率与检出率的取舍曲线。**开盘后应用 `--replay` 在真实数据上重算并据实调整** `TICK_IMPULSE_NET_RATIO` / `TICK_IMPULSE_Z` / `TICK_IMPULSE_CONFIRM_BUCKETS`。
+10. **秒级攻势的绝对值门槛按 510300 量级设定**：单桶 50 万、整波 3000 万。成交额小一个数量级的标的（如科创50 ETF）需要更大的相对波动才达标，如需单独覆盖可为其建一条更低阈值的规则（适用范围选「指定代码」）。
+9. **「国家队常买」是经验清单**：按中央汇金 / 国新 / 诚通的公开增持方向归纳为宽基宽口径标的，不是官方披露名单，可用 `FAST_TICK_CODES` 任意覆盖。
+
+---
+
+**免责声明**：本平台仅用于资金流向的观察与研究，不构成任何投资建议。行情数据可能存在延迟或缺失，请以交易所披露为准。

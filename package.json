@@ -1,0 +1,23 @@
+{
+  "name": "etf-flow-monitor",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A 股 ETF 资金流向实时监控与告警平台（零第三方依赖）",
+  "type": "module",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "scripts": {
+    "start": "node --disable-warning=ExperimentalWarning server/index.js",
+    "dev": "node --disable-warning=ExperimentalWarning --watch server/index.js",
+    "sync": "node --disable-warning=ExperimentalWarning scripts/sync-once.js",
+    "test": "node --disable-warning=ExperimentalWarning --test"
+  },
+  "keywords": [
+    "etf",
+    "fund-flow",
+    "a-share",
+    "monitor",
+    "alert"
+  ]
+}

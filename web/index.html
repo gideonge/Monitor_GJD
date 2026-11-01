@@ -1,0 +1,449 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ETF 资金流量监控平台</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true"></span>
+        <span class="brand-title">ETF 资金流量监控平台</span>
+        <span class="brand-sub">A-Share ETF Fund Flow Monitor</span>
+      </div>
+      <div class="topbar-meta">
+        <span class="chip" id="phase-chip"><span class="dot"></span><span id="phase-text">连接中</span></span>
+        <span class="chip" id="source-chip" title="数据来源">东方财富 · 资金流</span>
+        <span class="meta-item" title="东方财富返回的最后行情更新时间，含盘后数据刷新">最新行情 <b id="quote-time">—</b></span>
+        <span class="meta-item">刷新 <b id="update-time">—</b></span>
+        <button class="btn" id="refresh-btn" type="button">立即采集</button>
+      </div>
+    </header>
+
+    <main class="page">
+      <div class="banner" id="banner"></div>
+
+      <section class="kpis" id="kpis">
+        <div class="kpi in">
+          <div class="kpi-label" id="kpi-market-label">全市场主力净流入</div>
+          <div class="kpi-value" id="kpi-market-net">—</div>
+          <div class="kpi-sub" id="kpi-market-sub">—</div>
+        </div>
+        <div class="kpi accent">
+          <div class="kpi-label">监控池主力净流入</div>
+          <div class="kpi-value" id="kpi-tracked-net">—</div>
+          <div class="kpi-sub" id="kpi-tracked-sub">—</div>
+        </div>
+        <div class="kpi in">
+          <div class="kpi-label">净流入 / 净流出 家数</div>
+          <div class="kpi-value sm" id="kpi-breadth">—</div>
+          <div class="kpi-sub" id="kpi-breadth-sub">—</div>
+        </div>
+        <div class="kpi warn">
+          <div class="kpi-label">告警数（最近交易日窗口）</div>
+          <div class="kpi-value sm" id="kpi-alerts">—</div>
+          <div class="kpi-sub" id="kpi-alerts-sub">—</div>
+        </div>
+        <div class="kpi">
+          <div class="kpi-label">覆盖标的 / 生效规则</div>
+          <div class="kpi-value sm" id="kpi-coverage">—</div>
+          <div class="kpi-sub" id="kpi-coverage-sub">—</div>
+        </div>
+      </section>
+
+      <div class="layout">
+        <section class="panel">
+          <nav class="tabs" role="tablist">
+            <button class="tab is-active" data-tab="ranking" type="button">资金流排行</button>
+            <button class="tab" data-tab="trend" type="button">趋势分析</button>
+            <button class="tab" data-tab="alerts" type="button">告警历史<span class="tab-badge" id="alert-tab-badge">0</span></button>
+            <button class="tab" data-tab="rules" type="button">阈值规则</button>
+          </nav>
+
+          <!-- 资金流排行 -->
+          <div class="view is-active" data-view="ranking">
+            <div class="toolbar">
+              <div class="seg" id="rank-direction">
+                <button class="is-active" data-dir="inflow" type="button">净流入 TOP</button>
+                <button data-dir="outflow" type="button">净流出 TOP</button>
+              </div>
+              <div class="field">
+                <input type="search" id="rank-search" placeholder="代码 / 名称" style="width: 140px" />
+              </div>
+              <div class="field">
+                <select id="rank-category"><option value="">全部分类</option></select>
+              </div>
+              <div class="field">
+                <select id="rank-sort">
+                  <option value="mainNet">按主力净额</option>
+                  <option value="mainRatio">按净占比</option>
+                  <option value="superNet">按超大单</option>
+                  <option value="turnover">按成交额</option>
+                  <option value="pctChg">按涨跌幅</option>
+                </select>
+              </div>
+              <label class="field" style="cursor: pointer">
+                <input type="checkbox" id="rank-tracked" /> 仅监控池
+              </label>
+              <div class="spacer"></div>
+              <span class="chart-note" id="rank-count">—</span>
+            </div>
+            <div class="table-wrap">
+              <table class="data" id="rank-table">
+                <thead>
+                  <tr>
+                    <th style="width: 42px">#</th>
+                    <th>代码</th>
+                    <th>名称</th>
+                    <th>分类</th>
+                    <th class="num">主力净额</th>
+                    <th class="num">净占比</th>
+                    <th class="num">超大单</th>
+                    <th class="num">成交额</th>
+                    <th class="num">涨跌幅</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </div>
+
+          <!-- 趋势分析 -->
+          <div class="view" data-view="trend">
+            <div class="toolbar">
+              <div class="field">
+                <input type="search" id="trend-code" placeholder="输入 6 位代码，如 510300" style="width: 190px" />
+                <button class="btn btn-sm" id="trend-load" type="button">查看</button>
+              </div>
+              <div class="spacer"></div>
+              <span class="chart-note">快捷：</span>
+              <div id="trend-quick" style="display: flex; gap: 4px; flex-wrap: wrap"></div>
+            </div>
+            <div class="trend-head">
+              <div class="trend-title">
+                <span class="name" id="trend-name">—</span>
+                <span class="code" id="trend-code-label">—</span>
+                <span class="tag" id="trend-category">—</span>
+              </div>
+              <div class="trend-price" id="trend-price">—</div>
+              <div class="spacer"></div>
+              <div class="chart-note" id="trend-trade-date">—</div>
+            </div>
+            <div class="metrics-strip">
+              <div class="metric">
+                <div class="metric-label">当日主力净流入</div>
+                <div class="metric-value" id="m-today">—</div>
+              </div>
+              <div class="metric">
+                <div class="metric-label">近 5 日均值</div>
+                <div class="metric-value" id="m-avg">—</div>
+              </div>
+              <div class="metric">
+                <div class="metric-label">较均值差额</div>
+                <div class="metric-value" id="m-vs">—</div>
+              </div>
+              <div class="metric">
+                <div class="metric-label">分时数据点</div>
+                <div class="metric-value" id="m-points">—</div>
+              </div>
+            </div>
+            <div class="chart-block">
+              <div class="chart-head">
+                <span class="chart-title">日级主力净流入（近 60 个交易日）</span>
+                <span class="chart-note">红 = 净流入　绿 = 净流出</span>
+              </div>
+              <div class="chart-canvas" id="chart-daily" style="height: 210px"></div>
+            </div>
+            <div class="chart-block">
+              <div class="chart-head">
+                <span class="chart-title" id="intraday-title">分时走势与成交量</span>
+                <span class="chart-note" id="intraday-note">—</span>
+                <select id="intraday-date" style="width: 132px" aria-label="选择交易日">
+                  <option value="">—</option>
+                </select>
+              </div>
+              <div class="intraday-stats">
+                <div class="istat">
+                  <span class="istat-label">开盘</span>
+                  <span class="istat-value" id="i-open">—</span>
+                </div>
+                <div class="istat">
+                  <span class="istat-label">最高</span>
+                  <span class="istat-value" id="i-high">—</span>
+                </div>
+                <div class="istat">
+                  <span class="istat-label">最低</span>
+                  <span class="istat-value" id="i-low">—</span>
+                </div>
+                <div class="istat">
+                  <span class="istat-label">收盘</span>
+                  <span class="istat-value" id="i-close">—</span>
+                </div>
+                <div class="istat">
+                  <span class="istat-label">涨跌幅</span>
+                  <span class="istat-value" id="i-pct">—</span>
+                </div>
+                <div class="istat">
+                  <span class="istat-label">振幅</span>
+                  <span class="istat-value" id="i-amplitude">—</span>
+                </div>
+                <div class="istat">
+                  <span class="istat-label">成交额</span>
+                  <span class="istat-value" id="i-amount">—</span>
+                </div>
+                <div class="istat">
+                  <span class="istat-label">成交量</span>
+                  <span class="istat-value" id="i-volume">—</span>
+                </div>
+              </div>
+              <div class="chart-canvas" id="chart-intraday" style="height: 296px"></div>
+            </div>
+            <div class="chart-block" id="block-fast" hidden>
+              <div class="chart-head">
+                <span class="chart-title" id="fast-title">秒级盘口 · 主动买卖</span>
+                <span class="chart-note" id="fast-note">—</span>
+                <select id="fast-window" style="width: 108px" aria-label="秒级时间窗口">
+                  <option value="300">近 5 分钟</option>
+                  <option value="600" selected>近 10 分钟</option>
+                  <option value="1800">近 30 分钟</option>
+                </select>
+              </div>
+              <div class="intraday-stats">
+                <div class="istat">
+                  <span class="istat-label">窗口成交额</span>
+                  <span class="istat-value" id="f-amt">—</span>
+                </div>
+                <div class="istat">
+                  <span class="istat-label">主动净买入</span>
+                  <span class="istat-value" id="f-net">—</span>
+                </div>
+                <div class="istat">
+                  <span class="istat-label">主动买占比</span>
+                  <span class="istat-value" id="f-ratio">—</span>
+                </div>
+                <div class="istat">
+                  <span class="istat-label">买一/卖一</span>
+                  <span class="istat-value" id="f-imba">—</span>
+                </div>
+                <div class="istat">
+                  <span class="istat-label">最新价</span>
+                  <span class="istat-value" id="f-price">—</span>
+                </div>
+                <div class="istat">
+                  <span class="istat-label">窗口高</span>
+                  <span class="istat-value" id="f-high">—</span>
+                </div>
+                <div class="istat">
+                  <span class="istat-label">窗口低</span>
+                  <span class="istat-value" id="f-low">—</span>
+                </div>
+                <div class="istat">
+                  <span class="istat-label">采样点</span>
+                  <span class="istat-value" id="f-points">—</span>
+                </div>
+              </div>
+              <div class="chart-canvas" id="chart-fast" style="height: 210px"></div>
+            </div>
+            <div class="chart-block" id="block-flow-intraday" hidden>
+              <div class="chart-head">
+                <span class="chart-title">盘中累计主力净流入分时</span>
+                <span class="chart-note" id="chart-intraday-note">—</span>
+              </div>
+              <div class="chart-canvas" id="chart-flow-intraday" style="height: 180px"></div>
+            </div>
+          </div>
+
+          <!-- 告警历史 -->
+          <div class="view" data-view="alerts">
+            <div class="toolbar">
+              <div class="field">
+                <select id="alert-severity">
+                  <option value="">全部级别</option>
+                  <option value="high">高</option>
+                  <option value="medium">中</option>
+                  <option value="low">低</option>
+                </select>
+              </div>
+              <div class="field">
+                <select id="alert-metric">
+                  <option value="">全部指标</option>
+                </select>
+              </div>
+              <div class="field">
+                <select id="alert-ack">
+                  <option value="">全部状态</option>
+                  <option value="false">未确认</option>
+                  <option value="true">已确认</option>
+                </select>
+              </div>
+              <div class="field">
+                <select id="alert-range">
+                  <option value="">全部时间</option>
+                  <option value="24">最近 24 小时</option>
+                  <option value="72">最近 3 天</option>
+                  <option value="168">最近 7 天</option>
+                </select>
+              </div>
+              <div class="field">
+                <input type="search" id="alert-code" placeholder="ETF 代码" style="width: 120px" />
+              </div>
+              <div class="spacer"></div>
+              <span class="chart-note" id="alert-count">—</span>
+              <button class="btn btn-sm" id="alert-export" type="button">导出 CSV</button>
+            </div>
+            <div class="table-wrap">
+              <table class="data" id="alert-table">
+                <thead>
+                  <tr>
+                    <th style="width: 132px">触发时间</th>
+                    <th style="width: 58px">级别</th>
+                    <th>ETF</th>
+                    <th class="num">实测值</th>
+                    <th>触发条件</th>
+                    <th>规则</th>
+                    <th style="width: 78px">状态</th>
+                    <th style="width: 64px"></th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+            <div class="toolbar" style="border-top: 1px solid var(--line-2); border-bottom: 0">
+              <button class="btn btn-sm" id="alert-prev" type="button">上一页</button>
+              <button class="btn btn-sm" id="alert-next" type="button">下一页</button>
+              <span class="chart-note" id="alert-page">—</span>
+            </div>
+          </div>
+
+          <!-- 阈值规则 -->
+          <div class="view" data-view="rules">
+            <div class="toolbar">
+              <span class="chart-note">规则用于判定「资金量暴增 / 骤减」，命中后自动生成告警。</span>
+              <div class="spacer"></div>
+              <button class="btn btn-primary btn-sm" id="rule-new" type="button">新增规则</button>
+            </div>
+            <div class="table-wrap" style="max-height: 460px">
+              <table class="data" id="rule-table">
+                <thead>
+                  <tr>
+                    <th style="width: 52px">启用</th>
+                    <th>规则名称</th>
+                    <th>判定条件</th>
+                    <th>时间框架</th>
+                    <th>级别</th>
+                    <th class="num" style="text-align:right">冷却</th>
+                    <th style="width: 96px"></th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+            <form class="rule-form" id="rule-form">
+              <div class="form-grid">
+                <div class="form-item wide">
+                  <label for="rf-name">规则名称</label>
+                  <input type="text" id="rf-name" placeholder="如：5分钟主力急速流入" required />
+                </div>
+                <div class="form-item">
+                  <label for="rf-metric">监控指标</label>
+                  <select id="rf-metric"></select>
+                </div>
+                <div class="form-item">
+                  <label for="rf-timeframe">时间框架</label>
+                  <select id="rf-timeframe"></select>
+                </div>
+                <div class="form-item">
+                  <label for="rf-comparator">判定方向</label>
+                  <select id="rf-comparator">
+                    <option value="gt">大于阈值（流入/放大）</option>
+                    <option value="lt">小于阈值（流出/收缩）</option>
+                  </select>
+                </div>
+                <div class="form-item">
+                  <label for="rf-threshold">阈值</label>
+                  <input type="number" id="rf-threshold" step="any" placeholder="元 或 %" required />
+                  <span class="form-hint" id="rf-threshold-hint">金额单位：元（1 亿 = 100000000）</span>
+                </div>
+                <div class="form-item">
+                  <label for="rf-window">窗口长度（秒）</label>
+                  <input type="number" id="rf-window" min="30" max="3600" step="30" value="300" />
+                  <span class="form-hint">仅「窗口期」类指标生效</span>
+                </div>
+                <div class="form-item">
+                  <label for="rf-severity">告警级别</label>
+                  <select id="rf-severity">
+                    <option value="high">高</option>
+                    <option value="medium" selected>中</option>
+                    <option value="low">低</option>
+                  </select>
+                </div>
+                <div class="form-item">
+                  <label for="rf-cooldown">冷却时间（秒）</label>
+                  <input type="number" id="rf-cooldown" min="0" max="86400" step="60" value="1800" />
+                </div>
+                <div class="form-item wide">
+                  <label for="rf-scope">适用范围</label>
+                  <select id="rf-scope">
+                    <option value="all">全部监控池</option>
+                    <option value="category">指定分类</option>
+                    <option value="codes">指定代码</option>
+                  </select>
+                </div>
+                <div class="form-item full" id="rf-scope-category-wrap" style="display: none">
+                  <label>分类（可多选）</label>
+                  <div class="checkbox-list" id="rf-categories"></div>
+                </div>
+                <div class="form-item full" id="rf-scope-codes-wrap" style="display: none">
+                  <label for="rf-codes">ETF 代码（逗号分隔，6 位数字）</label>
+                  <input type="text" id="rf-codes" placeholder="510300, 159915" />
+                </div>
+                <div class="form-item full" style="flex-direction: row; align-items: center; gap: 10px">
+                  <button class="btn btn-primary" type="submit" id="rf-submit">保存规则</button>
+                  <button class="btn" type="button" id="rf-cancel">取消</button>
+                  <span class="form-hint" id="rf-mode-hint"></span>
+                </div>
+              </div>
+            </form>
+          </div>
+        </section>
+
+        <aside class="side">
+          <section class="panel">
+            <div class="panel-head">
+              <span class="panel-title">实时告警 <span class="count" id="live-count">0</span></span>
+              <span class="chart-note" id="live-hint">SSE 连接中</span>
+            </div>
+            <div class="alert-stream" id="live-stream">
+              <div class="empty">暂无告警</div>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-head">
+              <span class="panel-title">分类资金流</span>
+              <span class="chart-note">主力净额合计</span>
+            </div>
+            <div class="cat-list" id="cat-list">
+              <div class="empty">加载中…</div>
+            </div>
+          </section>
+        </aside>
+      </div>
+    </main>
+
+    <footer class="foot">
+      <div>
+        <b>数据说明</b>：资金流数值来源于东方财富公开行情接口（主力 / 超大单 / 大单 / 中单 / 小单净额），盘中按轮询间隔累积分时序列，日级历史用于趋势与基准计算。金额单位为人民币元，页面按 亿 / 万 缩写显示。
+      </div>
+      <div>
+        <b>指标口径</b>：主力净流入 = 超大单 + 大单净额；净占比 = 主力净额 / 成交额；「较近 5 日均值差额」= 当日主力净额 − 前 5 个交易日主力净额均值。所有阈值可在「阈值规则」中调整。
+      </div>
+      <div><b>风险提示</b>：本平台仅用于资金流向的观察与研究，不构成任何投资建议。行情数据可能存在延迟或缺失，请以交易所披露为准。</div>
+    </footer>
+
+    <div class="toast" id="toast"></div>
+    <script type="module" src="/js/app.js"></script>
+  </body>
+</html>

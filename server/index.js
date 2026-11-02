@@ -17,6 +17,7 @@ import { createIntradayService } from './services/intradayService.js';
 import { createVolumeSurgeService } from './services/volumeSurgeService.js';
 import { createFastTickService } from './services/fastTickService.js';
 import { createTickImpulseService } from './services/tickImpulseService.js';
+import { createIntraMinuteSurgeService } from './services/intraMinuteSurgeService.js';
 import { createQueryService } from './services/queryService.js';
 import { createCollector } from './jobs/collector.js';
 import { createApp } from './app.js';
@@ -47,6 +48,7 @@ async function main() {
   const volumeSurgeService = createVolumeSurgeService({ repos, events, logger });
   const fastTickService = createFastTickService({ db, repos, logger });
   const tickImpulseService = createTickImpulseService({ repos, events, logger, fastTickService });
+  const intraMinuteSurgeService = createIntraMinuteSurgeService({ repos, events, logger, fastTickService });
   const queryService = createQueryService({
     repos,
     marketService,
@@ -54,6 +56,7 @@ async function main() {
     volumeSurgeService,
     fastTickService,
     tickImpulseService,
+    intraMinuteSurgeService,
   });
   const collector = createCollector({
     marketService,
@@ -61,6 +64,7 @@ async function main() {
     volumeSurgeService,
     fastTickService,
     tickImpulseService,
+    intraMinuteSurgeService,
     logger,
   });
 
@@ -73,6 +77,7 @@ async function main() {
     volumeSurgeService,
     fastTickService,
     tickImpulseService,
+    intraMinuteSurgeService,
     queryService,
     collector,
     config,

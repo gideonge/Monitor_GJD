@@ -284,6 +284,56 @@ const config = {
     resonanceMinFamilies: readInt('TICK_IMPULSE_RESONANCE_MIN_FAMILIES', 2, { min: 1, max: 6 }),
   }),
 
+  /**
+   * 分钟内实时爆量（「第一手」预警）。
+   *
+   * 与 volumeSurge 的区别不是精度而是时点：那边等这根分钟收盘才判（最快 65 秒），
+   * 这边在第 9 秒起就能给出折算结论。参数标定见 reports/intra-minute-burst.md：
+   * 到达曲线取 0.8 分位（0.8 分位误报率 16%，0.85 分位降到 13% 但中位触发晚 2 秒，
+   * 取 0.8 是两者的折中）、倍数门槛 2.5×（低于分钟级的 3×，因为这是预警不是定稿）。
+   */
+  intraMinute: Object.freeze({
+    enabled: readBool('PREBURST_ENABLED', true),
+    /** 扫描间隔：2 秒。上游快照约 3 秒一次，1 秒扫只会读到重复点 */
+    scanIntervalMs: readInt('PREBURST_SCAN_MS', 2000, { min: 1000, max: 30000 }),
+    /** 基线窗口（分钟），与分钟级检测保持一致便于对账 */
+    baselineMinutes: readInt('PREBURST_BASELINE_MINUTES', 20, { min: 5, max: 60 }),
+    /** 基线最少分钟数，不足则不判定 */
+    minBaselineMinutes: readInt('PREBURST_MIN_BASELINE', 8, { min: 3, max: 40 }),
+    /** 到达曲线分位：越大越保守（假设这一分钟走得越快、折算越低） */
+    curveQuantile: readFloat('PREBURST_CURVE_QUANTILE', 0.8, { min: 0.5, max: 0.99 }),
+    /** 自建到达曲线所需的最少完整分钟数，不足时用内置先验曲线 */
+    minCurveMinutes: readInt('PREBURST_MIN_CURVE_MINUTES', 30, { min: 10, max: 120 }),
+    /** 触发门槛（折算倍数），比分钟级的 3× 低一档 */
+    ratioThreshold: readFloat('PREBURST_RATIO', 2.5, { min: 1.2, max: 10 }),
+    /** 折算倍数达到该值给强级 */
+    level3Ratio: readFloat('PREBURST_LEVEL3_RATIO', 5, { min: 2, max: 20 }),
+    /** 已成交额达到该值（元）同样给强级：钱已经实打实砸进来了，不必再靠折算证明 */
+    strongAmount: readInt('PREBURST_STRONG_AMOUNT', 30_000_000, { min: 1_000_000, max: 1_000_000_000 }),
+    /** 最少已过秒数：3 秒采样下 9 秒刚好 3 个点 */
+    minElapsedSec: readInt('PREBURST_MIN_ELAPSED_SEC', 9, { min: 3, max: 40 }),
+    /** 该分钟内最少采样点数 */
+    minSamples: readInt('PREBURST_MIN_SAMPLES', 3, { min: 2, max: 20 }),
+    /** 该分钟累计成交额下限（元）：判定门槛，决定「算不算在放量」 */
+    minAmount: readInt('PREBURST_MIN_AMOUNT', 3_000_000, { min: 100_000, max: 100_000_000 }),
+    /**
+     * 告警门槛（元，折算整分钟口径）：只影响「推不推送」，不影响「是否判定」。
+     * 实测 2026-11-02 极端行情：300 万门槛下每标的每日 16.8 条、3000 万门槛下 6.9 条，
+     * 后者才是一条能看住的告警流；小金额的放量仍然会在详情页的「正在放量」里亮灯。
+     */
+    alertMinAmount: readInt('PREBURST_ALERT_MIN_AMOUNT', 30_000_000, { min: 0, max: 1_000_000_000 }),
+    /** 观察档：折算倍数达到门槛的该比例时前端亮灯但不告警 */
+    watchRatio: readFloat('PREBURST_WATCH_RATIO', 0.7, { min: 0.3, max: 0.99 }),
+    /** 实时入库的最低等级 */
+    minAlertLevel: readInt('PREBURST_MIN_LEVEL', 2, { min: 1, max: 3 }),
+    /** 非实时（补录）入库的最低等级：收盘后回放只留强信号 */
+    backfillMinLevel: 3,
+    /** 判定为「实时」的时间窗口（秒）：超出则视为回放，按更严的门槛入库 */
+    liveWindowSec: readInt('PREBURST_LIVE_WINDOW_SEC', 180, { min: 30, max: 900 }),
+    /** 单轮最多落库条数 */
+    maxPerCycle: readInt('PREBURST_MAX_PER_CYCLE', 6, { min: 1, max: 60 }),
+  }),
+
   corsOrigins: readList('CORS_ORIGINS', [
     'http://127.0.0.1:8787',
     'http://localhost:8787',

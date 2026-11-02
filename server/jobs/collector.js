@@ -12,6 +12,7 @@ export function createCollector({
   volumeSurgeService,
   fastTickService,
   tickImpulseService,
+  intraMinuteSurgeService,
   logger,
 }) {
   const log = logger.child({ module: 'collector' });
@@ -127,6 +128,20 @@ export function createCollector({
     await tickImpulseService.scan();
   }
 
+  /**
+   * 分钟内实时爆量：每 2 秒扫一次核心池，判定「正在形成的那一分钟」。
+   *
+   * 这是整条链路上唯一能在爆量发生时（而不是收盘后）给结论的通道：
+   * 秒级采集 1 秒、上游快照约 3 秒、本环 2 秒，端到端延迟在 5 秒以内，
+   * 判定本身从第 9 秒开始。不需要等分钟 K 线落库，因此也不受 refreshLive 轮转影响。
+   */
+  async function preburstTask() {
+    if (!intraMinuteSurgeService) return;
+    const phase = marketPhase();
+    if (phase !== 'trading' && phase !== 'closing') return;
+    await intraMinuteSurgeService.scan();
+  }
+
   async function maintenanceTask() {
     marketService.pruneSnapshots();
     intradayService?.prune();
@@ -162,6 +177,8 @@ export function createCollector({
       loop('fast', config.fastTick.intervalMs, fastTask, 5000, 300);
       // 秒级攻势扫描：等采集环先跑几轮把内存缓冲攒起来（8 秒 ≈ 8 个点）
       loop('impulse', config.tickImpulse.scanIntervalMs, impulseTask, 8000, 500);
+      // 分钟内实时爆量：同样等采集环攒点，基线不足时由检测器自己拒绝判定
+      loop('preburst', config.intraMinute.scanIntervalMs, preburstTask, 9000, 500);
       loop('maintenance', 60 * 60 * 1000, maintenanceTask);
     },
 

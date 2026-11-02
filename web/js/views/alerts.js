@@ -35,7 +35,7 @@ export function createAlertsView({ toast, onOpenCode }) {
           const valueText = fmtMetricValue(row.metric, row.value);
           // 量能突变的数值是倍数，红绿会误导成资金方向，统一用中性色
           const valueColor =
-            row.metric === 'volume_surge'
+            row.metric === 'volume_surge' || row.metric === 'volume_preburst'
               ? 'var(--ink)'
               : row.value > 0
                 ? 'var(--in)'
@@ -192,7 +192,9 @@ export function createAlertsView({ toast, onOpenCode }) {
           row.category ?? '',
           row.ruleName,
           row.conditionText,
-          row.metric === 'main_net_ratio' || row.metric === 'volume_surge'
+          row.metric === 'main_net_ratio' ||
+          row.metric === 'volume_surge' ||
+          row.metric === 'volume_preburst'
             ? fmtMetricValue(row.metric, row.value)
             : String(row.value),
           row.acknowledged ? '已确认' : '未确认',

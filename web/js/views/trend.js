@@ -107,6 +107,89 @@ export function createTrendView({ toast }) {
   }
 
   /**
+   * 分钟内实时爆量：把「正在形成的那一分钟」折算成整分钟展示。
+   *
+   * 这条横条的定位与分时图不同：分时图上那根柱子要等分钟收盘才画得出来，
+   * 而爆量的第一手信息（大单在几十秒内扫掉卖盘）在分钟内就已经可见。
+   * 所以这里给的是「第几秒、已经成交多少、按当前进度折算多少倍」，
+   * 以及距离触发线还差多少，而不是一个已经完成的结果。
+   */
+  function renderPreburst() {
+    const strip = $('#preburst-strip');
+    if (!strip) return;
+    const view = fastData?.preburst ?? null;
+    const recap = fastData?.lastPreburst ?? null;
+    const hasPoints = (fastData?.points?.length ?? 0) >= 2;
+    const live = Boolean(view?.active) && hasPoints;
+
+    if (!live && !recap) {
+      strip.hidden = true;
+      return;
+    }
+    strip.hidden = false;
+
+    const tag = $('#preburst-tag');
+    const text = $('#preburst-text');
+    const fill = $('#preburst-fill');
+    const glyph = $('#preburst-glyph');
+    const bar = (value, total) => `${Math.min(100, (value / Math.max(total || 1, 1)) * 100).toFixed(0)}%`;
+
+    if (live) {
+      const classes = ['live-strip'];
+      if (view.stage === 'trigger') classes.push('is-trigger');
+      else if (view.stage === 'watch') classes.push('is-watch');
+      if (view.direction === 'drain') classes.push('is-drain');
+      strip.className = classes.join(' ');
+
+      const amount = fmtAmount(view.amount, { sign: false });
+      const baseline = fmtAmount(view.baseline, { sign: false });
+      const net =
+        view.net === null || view.net === undefined
+          ? ''
+          : `，主动净${view.direction === 'drain' ? '卖出' : '买入'} ${fmtAmount(Math.abs(view.net), { sign: false })}`;
+      const move =
+        view.priceMovePct === null || view.priceMovePct === undefined
+          ? ''
+          : `，价格 ${fmtSignedPct(view.priceMovePct)}`;
+
+      if (view.stage === 'trigger') {
+        tag.textContent = view.direction === 'drain' ? '分钟内在放量卖出' : '分钟内在爆量';
+        text.textContent = `${view.minute} 第 ${view.elapsedSec} 秒已成交 ${amount}，折算整分钟 ${fmtAmount(
+          view.projectedAmount,
+          { sign: false },
+        )}（${Number(view.projectedRatio).toFixed(2)}× 基线 ${baseline}）${net}${move}`;
+        fill.style.width = bar(view.amount, view.projectedAmount);
+        glyph.textContent = `L${view.level}`;
+      } else if (view.stage === 'watch') {
+        tag.textContent = '接近放量';
+        text.textContent = `${view.minute} 第 ${view.elapsedSec} 秒已成交 ${amount}（折算 ${Number(
+          view.projectedRatio,
+        ).toFixed(2)}× 基线 ${baseline}），触发线 ${fmtAmount(view.barAmount, { sign: false })}`;
+        fill.style.width = bar(view.amount, view.barAmount);
+        glyph.textContent = '待确认';
+      } else {
+        tag.textContent = '分钟实时';
+        text.textContent =
+          view.reason === 'baseline'
+            ? `监控中 · 基线攒集中（已有 ${view.baselineCount} 分钟，需 8 分钟）`
+            : `监控中 · ${view.minute} 第 ${view.elapsedSec} 秒 ${amount}${
+                view.projectedRatio ? `（折算 ${Number(view.projectedRatio).toFixed(2)}×）` : ''
+              } · 触发线 ${fmtAmount(view.barAmount, { sign: false })}`;
+        fill.style.width = view.barAmount ? bar(view.amount, view.barAmount) : '0%';
+        glyph.textContent = view.curveSource === 'prior' ? '先验曲线' : '自建曲线';
+      }
+      return;
+    }
+
+    // 收盘后：最后一根是 15:00 集合竞价，不判定；这里回放当日该通道真的报过的那一条
+    strip.className = 'live-strip is-recap';
+    tag.textContent = '今日实时爆量';
+    text.textContent = recap.message ?? '';
+    fill.style.width = '0%';
+    glyph.textContent = `${Number(recap.value).toFixed(2)}×`;
+  }
+
+  /**
    * 秒级盘口：只对核心池（国家队常买宽基）展示。
    * 后端已按 1 秒采样，这里只做展示，不做二次聚合——降采样会抹掉「连续大额扫单」的形态。
    */
@@ -173,6 +256,8 @@ export function createTrendView({ toast }) {
       height: 210,
       emptyText: fastData?.note ?? '等待盘中秒级数据（仅交易时段采集）',
     });
+
+    renderPreburst();
   }
 
   async function loadFast(code) {

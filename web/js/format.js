@@ -50,7 +50,7 @@ export function fmtInt(value) {
 export function fmtMetricValue(metric, value, digits = 2) {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return '—';
   if (metric === 'main_net_ratio') return `${Number(value).toFixed(digits)}%`;
-  if (metric === 'volume_surge') return `${Number(value).toFixed(digits)}×`;
+  if (metric === 'volume_surge' || metric === 'volume_preburst') return `${Number(value).toFixed(digits)}×`;
   if (metric === 'main_net_rate') return `${fmtAmount(value, { sign: false })}/分钟`;
   return fmtAmount(value);
 }

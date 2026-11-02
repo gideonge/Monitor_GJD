@@ -12,6 +12,12 @@ export const METRICS = {
    */
   volume_surge: { label: '分钟成交量突变', unit: '倍', timeframes: ['intraday'] },
   /**
+   * 分钟进行中的成交量折算倍数。
+   * 与 volume_surge 同口径但不同时点：K 线还没收盘就给出折算结论，
+   * 用于抢在价格走完之前看到「第一手爆量」。检测逻辑在 services/intraMinuteSurge.js。
+   */
+  volume_preburst: { label: '分钟内实时爆量', unit: '倍', timeframes: ['intraday'] },
+  /**
    * 单波秒级攻势的累计主动净买入额（元）。
    * 只对核心池（秒级通道）有定义，因此时间框架同样是 intraday。
    * 检测逻辑在 services/tickImpulse.js，设计取舍见 reports/tick-impulse-design.md。
@@ -119,6 +125,19 @@ export const DEFAULT_RULES = [
     cooldownSec: 300,
   },
   {
+    // 门槛 2.5× 比分钟级的 3× 低一档：这是预警不是定稿，分钟收盘后 volumeSurge 会再判一次。
+    // 冷却 180 秒对齐「一波行情」的典型长度（回放实测：120→309 条/日，180→252，240→217）。
+    name: '分钟内实时爆量',
+    metric: 'volume_preburst',
+    timeframe: 'intraday',
+    comparator: 'gt',
+    threshold: 2.5,
+    windowSec: 1200,
+    severity: 'high',
+    scope: 'all',
+    cooldownSec: 180,
+  },
+  {
     // 门槛是「一波攻势的累计主动净买入」，不是单桶峰值：单桶 800 万连续 4 桶的扫单，
     // 累计 3200 万，和单桶 3200 万的调仓是两件完全不同的事，用户关心的是前者。
     name: '秒级主动买入攻势',
@@ -152,7 +171,7 @@ export const DEFAULT_RULES = [
  * 这里用 app_state 记一个版本号做一次性增量播种，既不覆盖用户调参，
  * 也不会在用户删掉某条系统规则后每次重启又加回来。
  */
-const SYSTEM_RULES_VERSION = 3;
+const SYSTEM_RULES_VERSION = 4;
 
 export function createRuleRepo(db) {
   const insert = db.prepare(`

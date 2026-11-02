@@ -215,12 +215,16 @@ function updateStatus(status) {
 
 // ---------------- 实时告警流 ----------------
 
+/** 量能类指标（倍数为实测值，没有资金正负号） */
+const VOLUME_METRICS = new Set(['volume_surge', 'volume_preburst']);
+const isVolumeMetric = (metric) => VOLUME_METRICS.has(metric);
+
 const liveItems = [];
 
 function alertCardHtml(alert, isNew = false) {
   const valueText = fmtMetricValue(alert.metric, alert.value);
-  // 量能突变的实测值是倍数，没有资金方向，用中性色而不是红绿
-  const valueCls = alert.metric === 'volume_surge' ? '' : signClass(alert.value);
+  // 量能突变 / 分钟内爆量的实测值是倍数，没有资金方向，用中性色而不是红绿
+  const valueCls = isVolumeMetric(alert.metric) ? '' : signClass(alert.value);
   return `<div class="alert-card sev-${alert.severity}${isNew ? ' is-new' : ''}" data-code="${escapeHtml(
     alert.code,
   )}">
@@ -259,7 +263,7 @@ function prependAlert(alert) {
   $('#live-count').textContent = String(liveItems.length);
   // 量能突变的中/弱信号一天有上百条，逐条弹提示会变成骚扰：只弹强信号。
   // 其它指标维持原有行为（命中即弹），避免改动既有使用习惯。
-  const quiet = alert.metric === 'volume_surge' && alert.severity !== 'high';
+  const quiet = isVolumeMetric(alert.metric) && alert.severity !== 'high';
   if (!quiet) toast(`告警：${alert.etfName} ${alert.conditionText}`);
 }
 

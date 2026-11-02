@@ -14,7 +14,7 @@ export function formatMetric(metric, value, { signed = true } = {}) {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return '—';
   if (metric === 'main_net_ratio') return `${Number(value).toFixed(2)}%`;
   if (metric === 'main_net_rate') return `${formatAmount(value, { sign: signed })}/分钟`;
-  if (metric === 'volume_surge') return `${Number(value).toFixed(2)}×`;
+  if (metric === 'volume_surge' || metric === 'volume_preburst') return `${Number(value).toFixed(2)}×`;
   return formatAmount(value, { sign: signed });
 }
 
@@ -459,6 +459,136 @@ export function persistTickImpulseAlerts({ candidates, alertRepo, events, logger
 
   if (created.length > 0) {
     logger?.info('生成秒级攻势告警', { count: created.length });
+  }
+  return created;
+}
+
+/**
+ * 分钟内实时爆量的触发条件文案。
+ *
+ * 这条规则的口径里，「分位」和「判定秒数」是外行最容易误读的两项：
+ * 同样是「2 倍」，第 9 秒折算出来的 2 倍和第 50 秒折算出来的 2 倍，
+ * 证据强度完全不同。写进文案，回看时才能分辨当时是按什么标准亮的灯。
+ */
+export function buildPreburstConditionText(rule, params = {}) {
+  const comparator = COMPARATOR_LABEL[rule.comparator] ?? rule.comparator;
+  const quantile = Math.round((params.curveQuantile ?? 0.75) * 100);
+  const elapsed = params.minElapsedSec ?? 9;
+  const minutes = params.baselineMinutes ?? 20;
+  return `分钟内累计成交额按 ${quantile}% 分位到达曲线折算 ${comparator} ${Number(rule.threshold).toFixed(
+    2,
+  )}× 近 ${minutes} 分钟基线（第 ${elapsed} 秒起判定，累计额 ≥ ${formatAmount(params.minAmount ?? 1_000_000, {
+    sign: false,
+  })}）`;
+}
+
+function buildPreburstMessage({ etf, evaluation, params = {} }) {
+  const minutes = params.baselineMinutes ?? 20;
+  const isDrain = evaluation.direction === 'drain';
+  const netText =
+    evaluation.net === null || evaluation.net === undefined
+      ? ''
+      : `，主动净${isDrain ? '卖出' : '买入'} ${formatAmount(Math.abs(evaluation.net), { sign: false })}（占成交额 ${(
+          Math.abs(evaluation.netRatio) * 100
+        ).toFixed(0)}%）`;
+  const priceText =
+    evaluation.priceMovePct === null || evaluation.priceMovePct === undefined
+      ? ''
+      : `，价格 ${formatPct(evaluation.priceMovePct)}`;
+  const trendText = isDrain ? '主动卖压' : '主动买盘';
+  return `${etf.name}（${etf.code}）${evaluation.minute} 第 ${evaluation.elapsedSec} 秒已成交 ${formatAmount(
+    evaluation.amount,
+    { sign: false },
+  )}，按当前进度折算整分钟 ${formatAmount(evaluation.projectedAmount, { sign: false })}（${Number(
+    evaluation.projectedRatio,
+  ).toFixed(2)}× 近 ${minutes} 分钟基线 ${formatAmount(evaluation.baseline, { sign: false })}）${netText}${priceText}，${trendText}`;
+}
+
+/**
+ * 分钟内实时爆量告警落库与广播。
+ *
+ * 与 volumeSurge 的关系是「预警 + 定稿」，不是替代：
+ *   这里在分钟还没走完时先报（第 9~40 秒），价格通常还没走；
+ *   分钟收盘后 volumeSurge 用完整 K 线再判一次，那条才是定稿记录。
+ * 两条用不同的 dedupe 前缀（n: / v:），因此同一波会有「预警 + 定稿」两条，
+ * 这是刻意保留的：预警的价值就在于它比定稿早 1~2 分钟。
+ */
+export function persistPreburstAlerts({ candidates, alertRepo, events, logger, params = {}, now = Date.now() }) {
+  const created = [];
+
+  for (const candidate of candidates) {
+    const { rule, etf, tradeDate, evaluation, severity, source } = candidate;
+    const cooldownMs = (rule.cooldownSec ?? rule.cooldown_sec ?? 300) * 1000;
+    const last = alertRepo.lastTriggeredAt(rule.id, etf.code);
+    if (last && evaluation.lastTs - last < cooldownMs && evaluation.lastTs >= last) continue;
+
+    const conditionText = buildPreburstConditionText(rule, params);
+    const message = buildPreburstMessage({ etf, evaluation, params });
+
+    const id = alertRepo.insert({
+      ruleId: rule.id,
+      ruleName: rule.name,
+      code: etf.code,
+      etfName: etf.name,
+      category: etf.category,
+      metric: 'volume_preburst',
+      timeframe: 'intraday',
+      comparator: rule.comparator,
+      threshold: rule.threshold,
+      value: evaluation.projectedRatio,
+      delta: evaluation.amount - (evaluation.barAmount ?? 0),
+      baseline: evaluation.baseline,
+      windowSec: (params.baselineMinutes ?? 20) * 60,
+      severity,
+      conditionText,
+      message,
+      dedupeKey: `n:${tradeDate}:${evaluation.minute}`,
+      source,
+      tradeDate,
+      triggeredAt: evaluation.lastTs,
+    });
+    if (id === null) continue;
+
+    const alert = {
+      id,
+      ruleId: rule.id,
+      ruleName: rule.name,
+      code: etf.code,
+      etfName: etf.name,
+      category: etf.category,
+      metric: 'volume_preburst',
+      timeframe: 'intraday',
+      comparator: rule.comparator,
+      threshold: rule.threshold,
+      value: evaluation.projectedRatio,
+      delta: evaluation.amount - (evaluation.barAmount ?? 0),
+      baseline: evaluation.baseline,
+      windowSec: (params.baselineMinutes ?? 20) * 60,
+      conditionText,
+      message,
+      severity,
+      triggeredAt: evaluation.lastTs,
+      triggeredAtText: formatDateTime(evaluation.lastTs),
+      source,
+      acknowledged: 0,
+      // 供前端做「进行中」标注：这条记录对应的是某一分钟的实时推演，不是定稿
+      minute: evaluation.minute,
+      level: evaluation.level,
+      direction: evaluation.direction,
+      early: true,
+      elapsedSec: evaluation.elapsedSec,
+      projectedAmount: evaluation.projectedAmount,
+      amount: evaluation.amount,
+      netAmount: evaluation.net,
+      tradeDate,
+    };
+
+    created.push(alert);
+    events?.publish(EVENTS.ALERT, alert);
+  }
+
+  if (created.length > 0) {
+    logger?.info('生成分钟内实时爆量告警', { count: created.length });
   }
   return created;
 }

@@ -160,7 +160,8 @@ test('量能骤增 + 价格突破：命中规则并按分钟落库一次', async
   assert.equal(alert.value, 40);
   assert.equal(alert.trade_date, TRADE_DATE);
   assert.match(alert.condition_text, /分钟成交量 大于 3\.00× 近 20 分钟基线/);
-  assert.match(alert.message, /突破前 20 分钟高点/);
+  assert.match(alert.message, /突破前 20 分钟极值/);
+  assert.match(alert.message, /当日成交额峰值/);
 });
 
 test('重复扫描幂等：同一分钟不会重复告警', async () => {
@@ -205,16 +206,26 @@ test('绝对成交额门槛过滤地量放量', async () => {
 });
 
 test('盘中实时按规则等级入库，收盘回放只留强信号', async () => {
-  const bars = buildBars('510300', { volumeAt: { '10:20': MEDIUM }, priceAt: { '10:20': 4.03 } });
+  // 两根：09:40 是当日峰值（强），10:20 量能不足此前峰值（中）
+  const bars = buildBars('510300', {
+    volumeAt: { '09:40': 6_000, '10:20': MEDIUM },
+    priceAt: { '09:40': 4.03, '10:20': 4.05 },
+  });
   const live = setup({ bars });
   const liveResult = await live.service.scan({ now: tsOf('10:20') + 30_000 });
-  assert.equal(liveResult.alerts, 1);
-  assert.equal(alertsOf(live.repos)[0].severity, 'medium');
-  assert.equal(alertsOf(live.repos)[0].source, 'live');
+  assert.equal(liveResult.alerts, 2);
+  const liveSeverities = alertsOf(live.repos).map((alert) => alert.severity).sort();
+  assert.deepEqual(liveSeverities, ['high', 'medium'], '两根应分别落成强/中两档');
+  // 09:40 的事件距扫描时刻已 40 分钟，按「回放」入库；10:20 才算实时
+  const byMinute = Object.fromEntries(alertsOf(live.repos).map((alert) => [alert.dedupe_key.slice(-5), alert]));
+  assert.equal(byMinute['09:40'].source, 'backfill');
+  assert.equal(byMinute['10:20'].source, 'live');
 
   const replay = setup({ bars });
   const replayResult = await replay.service.scan({ now: tsOf('10:20') + 3600_000 });
-  assert.equal(replayResult.alerts, 0, '中等级信号在回放时不应写入告警表');
+  assert.equal(replayResult.alerts, 1, '回放只留强信号');
+  assert.equal(alertsOf(replay.repos)[0].severity, 'high');
+  assert.equal(alertsOf(replay.repos)[0].source, 'backfill');
 });
 
 test('适用范围为指定代码时不影响其它标的', async () => {
@@ -248,17 +259,22 @@ test('骤减事件不会被 gt 规则误收', async () => {
 
 test('explain 不受告警等级门槛限制，弱信号也能用于图表标注', () => {
   const { service } = setup({
-    bars: buildBars('510300', { volumeAt: { '10:20': MEDIUM }, priceAt: { '10:20': 4.03 } }),
+    bars: buildBars('510300', {
+      volumeAt: { '09:40': 6_000, '10:20': MEDIUM },
+      priceAt: { '09:40': 4.03, '10:20': 4.05 },
+    }),
     options: { minAlertLevel: 3 },
   });
 
   const explained = service.explain('510300', TRADE_DATE);
-  assert.equal(explained.events.length, 1);
-  assert.equal(explained.events[0].minute, '10:20');
-  assert.equal(explained.events[0].level, 2);
-  assert.equal(explained.events[0].ts, tsOf('10:20'));
-  assert.ok(explained.events[0].ratio > 3);
-  assert.equal(explained.params.requireRangeBreak, true);
+  assert.equal(explained.events.length, 2, '门槛设为「只推强」时，图上仍应标出中等级');
+  const mid = explained.events.find((event) => event.minute === '10:20');
+  assert.equal(mid.level, 2);
+  assert.equal(mid.ts, tsOf('10:20'));
+  assert.ok(mid.ratio > 3);
+  assert.equal(mid.confirmed, true, '突破前高应记为 confirmed');
+  assert.equal(explained.params.confirmMode, 'break', 'setup 传的是旧严格口径');
+  assert.ok(explained.stats.confirmedCount >= 1);
 });
 
 test('无规则或未启用时扫描直接返回，不产生告警', async () => {

@@ -184,16 +184,34 @@ const config = {
     scanIntervalMs: readInt('SURGE_SCAN_INTERVAL_MS', 60000, { min: 15000, max: 600000 }),
     /** 每轮盘中刷新的标的数（轮转覆盖监控池），0 表示不主动刷新、只读已有缓存 */
     liveRefreshLimit: readInt('SURGE_LIVE_REFRESH_LIMIT', 40, { min: 0, max: 200 }),
-    /** 区间突破确认：回测中该项把方向命中率从 55.8% 提升到 70.2% */
-    requireRangeBreak: readBool('SURGE_REQUIRE_BREAK', true),
+    /**
+     * 价格确认模式，决定「量能放大」如何分级、哪些进入推送：
+     *   graded —— 默认。突破 / 位移 / 收在极值侧三选一定方向；无任何确认的仍然
+     *             标注（L1，不推送），当日成交额峰值提到 L2。
+     *   break  —— 旧口径，只保留「收盘价突破前 20 分钟极值」的事件，
+     *             方向命中率最高但会丢掉尾盘抢筹、半日收盘封在最高价这类最显眼的爆量。
+     *   strict —— 要求至少一条价格确认，其余直接丢弃（图上也不标注）。
+     */
+    confirmMode: readString('SURGE_CONFIRM_MODE', 'graded'),
+    /** 价格位移确认阈值（%）：该分钟涨跌幅绝对值达到此值即视为有方向 */
+    minTickPct: readFloat('SURGE_MIN_TICK_PCT', 0.1, { min: 0, max: 5 }),
+    /** 极值收盘确认：收盘价即当分钟最高/最低价视为单向扫单 */
+    edgeConfirm: readBool('SURGE_EDGE_CONFIRM', true),
+    /** 当日成交额峰值加成：整波累计额创当日新高时提升等级 */
+    peakBoost: readBool('SURGE_PEAK_BOOST', true),
+    /** 同波合并间隔（分钟）：相邻异动分钟间隔不超过该值即合并为一处标注、一条告警 */
+    mergeGapBars: readInt('SURGE_MERGE_GAP_BARS', 5, { min: 0, max: 30 }),
     /** 单分钟成交额下限（元），过滤「10 手变 200 手」这类无资金含义的地量噪声 */
     minAmount: readInt('SURGE_MIN_AMOUNT', 3_000_000, { min: 0, max: 1_000_000_000 }),
     /** 盘中实时入库的最低强度等级（1 弱 / 2 中 / 3 强）；弱信号只做图表标注 */
     minAlertLevel: readInt('SURGE_MIN_LEVEL', 2, { min: 1, max: 3 }),
     /** 事件被判定为「实时」的时间窗口（秒）：超出窗口的历史事件按回放处理 */
     liveWindowSec: readInt('SURGE_LIVE_WINDOW_SEC', 600, { min: 60, max: 3600 }),
-    /** 回放（收盘后补录）入库的最低强度等级：只留强信号，避免历史回放淹没告警页 */
-    backfillMinLevel: 3,
+    /**
+     * 回放（收盘后补录）入库的最低强度等级：只留强信号，避免历史回放淹没告警页。
+     * 「强」在新口径下 = 价格突破确认 + 当日成交额峰值，两日回测方向命中 64%。
+     */
+    backfillMinLevel: readInt('SURGE_BACKFILL_MIN_LEVEL', 3, { min: 1, max: 3 }),
   }),
 
   /**

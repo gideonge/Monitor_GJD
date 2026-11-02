@@ -80,7 +80,10 @@ export function createTrendView({ toast }) {
     const strong = count(3);
     const medium = count(2);
     const weak = count(1);
-    return ` · 量能异动 ${events.length} 处（强 ${strong} / 中 ${medium} / 弱 ${weak}）`;
+    // 未确认事件照样标注（空心点），这里点明数量，避免把观察信号误读成资金进攻
+    const watch = events.filter((item) => item.confirmed === false).length;
+    const watchText = watch > 0 ? `，其中 ${watch} 处方向待确认` : '';
+    return ` · 量能异动 ${events.length} 处（强 ${strong} / 中 ${medium} / 弱 ${weak}${watchText}）`;
   };
 
   function renderIntradayHeader() {

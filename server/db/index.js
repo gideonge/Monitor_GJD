@@ -36,10 +36,20 @@ export function runMigrations(db, migrationsDir, logger) {
   );
 
   for (const file of files) {
-    const sql = fs.readFileSync(path.join(migrationsDir, file), 'utf8');
+    const raw = fs.readFileSync(path.join(migrationsDir, file), 'utf8');
+    // 行尾归一后再算校验和。库最初是在 Windows 检出（CRLF）上建起来的、服务器上是 LF，
+    // 同一个文件在两条链路上哈希不同，会误报「迁移文件在应用后被修改」（2026-11-02 踩到）。
+    // 因此 LF / CRLF 两种形态都认，新应用的迁移一律写入 LF 哈希。
+    const sql = raw.replace(/\r\n/g, '\n');
     const checksum = crypto.createHash('sha256').update(sql).digest('hex').slice(0, 16);
+    const crlfChecksum = crypto
+      .createHash('sha256')
+      .update(sql.replace(/\n/g, '\r\n'))
+      .digest('hex')
+      .slice(0, 16);
     if (applied.has(file)) {
-      if (applied.get(file) !== checksum) {
+      const recorded = applied.get(file);
+      if (recorded !== checksum && recorded !== crlfChecksum) {
         throw new Error(`迁移文件 ${file} 在应用后被修改，请新增迁移而不是改写历史迁移`);
       }
       continue;

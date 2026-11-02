@@ -224,26 +224,39 @@ export function persistAlerts({ candidates, alertRepo, events, logger, source = 
  * 参数直接影响这条文案：关掉突破确认后，同样的阈值意味着完全不同的信噪比，
  * 所以必须在文案里显式写清楚，否则回溯告警时分不清当时用的是什么口径。
  */
-export function buildSurgeConditionText(rule, { baselineWindow = 20, requireRangeBreak = false } = {}) {
+export function buildSurgeConditionText(rule, { baselineWindow = 20, confirmMode = 'graded' } = {}) {
   const comparator = COMPARATOR_LABEL[rule.comparator] ?? rule.comparator;
-  const suffix = requireRangeBreak ? `，需同向突破前 ${baselineWindow} 分钟极值` : '';
+  const suffix =
+    confirmMode === 'break'
+      ? `，需同向突破前 ${baselineWindow} 分钟极值`
+      : confirmMode === 'off'
+        ? '，不要求价格确认'
+        : '，需价格确认（突破前 20 分钟极值 / 位移 / 收在极值侧）';
   return `分钟成交量 ${comparator} ${Number(rule.threshold).toFixed(2)}× 近 ${baselineWindow} 分钟基线${suffix}`;
 }
 
-function buildSurgeMessage({ etf, event, params }) {
+/** 确认方式的文案：写成「突破前 20 分钟高点」必须是真的突破了，不能拿位移冒名顶替 */
+const CONFIRM_TEXT = {
+  break: '，突破前 20 分钟极值',
+  touch: '，贴前 20 分钟极值报收',
+  move: '，价格位移确认',
+  edge: '，收在当分钟极值侧',
+  none: '，区间内堆量（方向待确认）',
+};
+
+function buildSurgeMessage({ etf, event }) {
   const direction = event.direction === 'drain' ? '骤减' : '突变';
   const priceText =
     event.tickRet === null || event.tickRet === undefined
       ? '价格无位移'
       : `价格 ${event.tickRet >= 0 ? '+' : ''}${event.tickRet.toFixed(2)}%`;
-  const breakText = params.requireRangeBreak
-    ? event.tickRet > 0
-      ? '，突破前 20 分钟高点'
-      : '，跌破前 20 分钟低点'
-    : '';
-  return `${etf.name}（${etf.code}）${event.minute} 成交量${direction}至 ${event.ratio.toFixed(2)}× 近 ${
-    params.baselineWindow
-  } 分钟基线（${formatHands(event.baseline)} → ${formatHands(event.volume)}），${priceText}${breakText}`;
+  const confirmText = CONFIRM_TEXT[event.confirm] ?? '';
+  const peakText = event.dayPeak ? '，当日成交额峰值' : '';
+  const waveText =
+    event.mergedBars > 1 ? `，本波 ${event.mergedBars} 根连续放量累计 ${formatAmount(event.sumAmount ?? 0)}` : '';
+  return `${etf.name}（${etf.code}）${event.spanFrom ?? event.minute} 成交量${direction}至 ${event.ratio.toFixed(
+    2,
+  )}× 近 20 分钟基线（${formatHands(event.baseline)} → ${formatHands(event.volume)}），${priceText}${confirmText}${peakText}${waveText}`;
 }
 
 /**
@@ -263,7 +276,7 @@ export function persistSurgeAlerts({ candidates, alertRepo, events, logger, para
     if (last && event.ts - last < cooldownMs && event.ts >= last) continue;
 
     const conditionText = buildSurgeConditionText(rule, params);
-    const message = buildSurgeMessage({ etf, event, params });
+    const message = buildSurgeMessage({ etf, event });
 
     const id = alertRepo.insert({
       ruleId: rule.id,

@@ -53,8 +53,12 @@ export const DEFAULT_PARAMS = Object.freeze({
   minAmount: 0,
   /** 连续确认根数：需连续 n 根均越线才成立，抑制单点毛刺 */
   persistBars: 1,
-  /** 同一标的冷却分钟数 */
-  cooldownBars: 5,
+  /**
+   * 同波合并间隔（分钟）：相邻两个异动分钟间隔不超过该值即视为同一波行情，
+   * 合并为一处标注、一条告警，累计成交额参与强度分级。
+   * 0 表示不合并（每个异动分钟各自成条）。
+   */
+  mergeGapBars: 5,
   /**
    * 短期基线窗口（分钟）与一致性系数。
    *
@@ -75,14 +79,45 @@ export const DEFAULT_PARAMS = Object.freeze({
    * 价格位移确认（%）：该分钟涨跌幅绝对值下限，0 表示不启用。
    * 用途：量能放大但价格纹丝不动的分钟，多为 ETF 申赎、期现对冲或算法拆单，
    * 属于「被动放量」，对判断资金方向没有信息量，回测中这类事件的方向命中率接近随机。
+   *
+   * 注意：位移只是「确认证据」之一，不是独立否决条件。三条证据（区间突破 /
+   * 价格位移 / 收在当分钟极值侧）任一成立即视为有方向，见 requireConfirm。
    */
-  minTickPct: 0,
+  minTickPct: 0.1,
   /**
-   * 区间突破确认：要求该分钟收盘价同向突破前 baselineWindow 分钟的极值。
-   * 用途：区分「主动扫单打穿盘口」与「区间内堆量」。前者意味着承接被吃穿，
-   * 后续更容易延续；后者往往只是换手放大。
+   * 极值收盘确认：收盘价即当分钟最高价（买方吃穿全部卖盘）或最低价，
+   * 是「整分钟单向扫单」的直接形态证据，必须带 high/low 才有意义。
+   */
+  edgeConfirm: true,
+  /**
+   * 是否丢弃「无任何价格确认」的事件。
+   *
+   * 默认 false：不丢，只降级为观察级（L1）并在图上标注。
+   * 这是 2026-11-02 修订的核心——旧版把区间突破当准入条件，静默丢掉了 57% 的
+   * 原始事件，其中包含全天成交额最大的那几分钟（尾盘抢筹、半日收盘封在最高价，
+   * 价格根本没离开区间），用户看到「最明显的柱子没有任何标记」。
+   * 对资金监控来说「有没有动」比「动得是否漂亮」更重要，宁可弱级标注也不该静默。
+   */
+  requireConfirm: false,
+  /**
+   * 兼容开关：true 时退回旧行为——只认「区间突破」，其余一律丢弃。
+   * 仅用于复现历史回测，线上用 confirmMode 控制。
    */
   requireRangeBreak: false,
+  /**
+   * 当日成交额峰值加成：整波累计成交额超过当日此前任何一分钟时，作为独立分档依据。
+   *
+   *   - 未确认 + 峰值 → 中等级（推送，标注「方向待确认」）
+   *   - 已确认 + 峰值 + 强度不弱 → 强等级
+   *
+   * 为什么需要它：倍数与 z 都是相对量，尾盘连续放量时基线被自己抬高，全天成交额
+   * 最大的那一分钟可能只有 4 倍、被判「弱」。而人眼在分时图上看到的就是「最大那根
+   * 柱子」。用「当日至今最大」做判据是无标度偏差的：货币 ETF 的申赎巨量在它自己
+   * 的序列里同样只是平常的一分钟，不会因此虚升。
+   *
+   * 因果可用：只用该分钟之前的序列比较，实时判定无需未来信息。
+   */
+  peakBoost: true,
 });
 
 function median(values) {
@@ -113,10 +148,20 @@ export function sessionOf(minute) {
  */
 export function gradeIntensity({ ratio, z }) {
   const strength = Math.abs(Math.log2(Math.max(ratio, 1e-9)));
-  const score = 0.6 * Math.min(strength, 5) / 5 + 0.4 * Math.min(Math.abs(z), 12) / 12;
+  const score = (0.6 * Math.min(strength, 5)) / 5 + (0.4 * Math.min(Math.abs(z), 12)) / 12;
   if (score >= 0.8) return { level: 3, label: '强', score };
   if (score >= 0.55) return { level: 2, label: '中', score };
   return { level: 1, label: '弱', score };
+}
+
+const LEVEL_LABELS = { 1: '弱', 2: '中', 3: '强' };
+
+/** 确认证据的强弱排序：break > touch > move > edge，none 视为无方向 */
+function strongestConfirm(evidence) {
+  for (const key of ['break', 'touch', 'move', 'edge']) {
+    if (evidence.includes(key)) return key;
+  }
+  return 'none';
 }
 
 /**
@@ -133,9 +178,17 @@ export function detectVolumeSurge(bars, options = {}) {
   const dayMedian = median(tradable.map((bar) => Number(bar.volume)));
   const absFloor = dayMedian * params.absFloorRatio;
 
-  const events = [];
+  const raw = [];
   const skipped = [];
-  let lastEventIndex = -Infinity;
+
+  // 成交额的「当日至今最大值」（不含当前分钟）：峰值加成用它做判据，天然因果。
+  const amountPrefixMax = new Array(rows.length).fill(0);
+  let runningMaxAmount = 0;
+  for (let i = 0; i < rows.length; i += 1) {
+    amountPrefixMax[i] = runningMaxAmount;
+    const current = Number(rows[i].amount);
+    if (Number.isFinite(current) && current > runningMaxAmount) runningMaxAmount = current;
+  }
 
   for (let i = 0; i < rows.length; i += 1) {
     const bar = rows[i];
@@ -208,38 +261,89 @@ export function detectVolumeSurge(bars, options = {}) {
       }
     }
 
-    // 价格确认：把「有方向的主动放量」从「无方向的被动放量」里分出来
+    // ---------------- 价格确认：三条证据任一成立即视为「有方向」
+    //
+    // 旧版把「区间突破」当硬门槛，代价是 57% 的原始事件被静默丢弃。实盘里最典型的
+    // 漏报是：尾盘连续放量时基线被自己抬高，价格在区间内贴着上沿反复承接，全天
+    // 成交额最大的那几分钟既没有创新高也没有位移，于是全部消失。
     const prevClose = Number(rows[i - 1]?.close);
     const price = Number(bar.close);
     const tickRet = Number.isFinite(prevClose) && prevClose > 0 ? ((price - prevClose) / prevClose) * 100 : null;
+    const barHigh = Number(bar.high);
+    const barLow = Number(bar.low);
 
-    if (params.minTickPct > 0) {
-      if (tickRet === null || Math.abs(tickRet) < params.minTickPct) {
-        skipped.push({ minute, reason: `价格位移不足(${tickRet === null ? '—' : tickRet.toFixed(3)}%)` });
-        continue;
+    const priorCloses = [];
+    for (let j = i - 1; j >= 0 && priorCloses.length < params.baselineWindow; j -= 1) {
+      if (sessionOf(rows[j].minute) !== session) break;
+      const prevValue = Number(rows[j].close);
+      if (Number.isFinite(prevValue) && prevValue > 0) priorCloses.push(prevValue);
+    }
+
+    const evidence = [];
+    let priceDir = null;
+
+    // 证据一：区间突破。ETF 最小变动价位 0.001 元，20 分钟区间常常只有 3~7 个跳动，
+    // 「收在最高价、与前一高点持平」是一分不破的封板式抢筹，旧版用严格大于把它判成
+    // 未突破（159259 的 11:30 就是 close = priorMax = 当日最高 0.921，量能 6.8 倍被丢）。
+    // 因此把「等于前极值且报收在该极值」单独记为 touch，强度略低于真正突破。
+    if (priorCloses.length >= params.minBaseline) {
+      const priorMax = Math.max(...priorCloses);
+      const priorMin = Math.min(...priorCloses);
+      const atHigh = Number.isFinite(barHigh) && barHigh === price;
+      const atLow = Number.isFinite(barLow) && barLow === price;
+      if (price > priorMax) {
+        evidence.push('break');
+        priceDir = 'up';
+      } else if (price < priorMin) {
+        evidence.push('break');
+        priceDir = 'down';
+      } else if (price === priorMax && atHigh) {
+        evidence.push('touch');
+        priceDir = 'up';
+      } else if (price === priorMin && atLow) {
+        evidence.push('touch');
+        priceDir = 'down';
       }
     }
 
-    if (params.requireRangeBreak) {
-      if (tickRet === null || tickRet === 0) {
-        skipped.push({ minute, reason: '价格无方向' });
-        continue;
+    // 证据二：价格位移。跌 0.33% 的放量下跌同样是有方向的异动（承接被砸），
+    // 不该因为「没创区间新低」而丢掉。
+    if (priceDir === null && params.minTickPct > 0 && tickRet !== null && Math.abs(tickRet) >= params.minTickPct) {
+      evidence.push('move');
+      priceDir = tickRet > 0 ? 'up' : 'down';
+    }
+
+    // 证据三：收在当分钟极值侧。整分钟单向扫单的直接形态证据：买方吃穿全部卖盘时
+    // 收盘价必然等于最高价。缺 high/low 的样本自动跳过这一条。
+    if (
+      priceDir === null &&
+      params.edgeConfirm &&
+      Number.isFinite(barHigh) &&
+      Number.isFinite(barLow) &&
+      barHigh > barLow
+    ) {
+      if (price === barHigh) {
+        evidence.push('edge');
+        priceDir = 'up';
+      } else if (price === barLow) {
+        evidence.push('edge');
+        priceDir = 'down';
       }
-      const priorCloses = [];
-      for (let j = i - 1; j >= 0 && priorCloses.length < params.baselineWindow; j -= 1) {
-        if (sessionOf(rows[j].minute) !== session) break;
-        const value = Number(rows[j].close);
-        if (Number.isFinite(value) && value > 0) priorCloses.push(value);
-      }
-      if (priorCloses.length < params.minBaseline) {
-        skipped.push({ minute, reason: '区间样本不足' });
-        continue;
-      }
-      const breaks = tickRet > 0 ? price > Math.max(...priorCloses) : price < Math.min(...priorCloses);
-      if (!breaks) {
-        skipped.push({ minute, reason: '区间内堆量未突破' });
-        continue;
-      }
+    }
+
+    // 方向是否与量能同向：放量上涨（攻击）与放量下跌（承接被砸）都值得报，
+    // 但只有同向才算「资金进攻」，反向要降级处理。
+    const align =
+      priceDir === null ? null : direction === 'surge' ? priceDir === 'up' : priceDir === 'down';
+
+    if (params.requireRangeBreak && !evidence.includes('break')) {
+      skipped.push({ minute, reason: '未突破前 20 分钟极值（严格模式）' });
+      continue;
+    }
+
+    if (params.requireConfirm && evidence.length === 0) {
+      skipped.push({ minute, reason: `无价格确认（区间内堆量且位移<${params.minTickPct}%）` });
+      continue;
     }
 
     // 连续确认：向前看 persistBars-1 根是否同向越线（回测时这是事后信息，
@@ -256,37 +360,111 @@ export function detectVolumeSurge(bars, options = {}) {
       if (confirmed < params.persistBars - 1) continue;
     }
 
-    if (i - lastEventIndex < params.cooldownBars) {
-      skipped.push({ minute, reason: '冷却期内' });
-      continue;
-    }
+    // 强度分级：三个维度（相对倍数 / 稳健 z / 绝对成交额）。
+    // 单根先不评级——同一波行情里的连续放量会合并成「一件事」后整体重算。
+    const confirm = strongestConfirm(evidence);
 
-    const { level, label, score } = gradeIntensity({ ratio, z });
-
-    events.push({
+    raw.push({
       index: i,
       minute,
       session,
       direction,
       volume,
+      amount: Number.isFinite(Number(bar.amount)) ? Number(bar.amount) : null,
       baseline,
       ratio,
       z,
-      score,
-      level,
-      levelLabel: label,
       price,
       tickRet,
+      priceDir,
+      align,
+      confirm,
+      evidence,
       /** 该分钟量占当日可判定时段总量的比例，用于衡量单分钟冲击的绝对量级 */
       volumeShare: null,
     });
+  }
 
-    lastEventIndex = i;
+  // ---------------- 合并成波
+  //
+  // 同一波行情里逐分钟越线，对看盘的人只是一件事：13:26 到 13:36 连续 4 根爆量，
+  // 画 4 个标记只会把真正的拐点淹掉。这里按「相邻事件间隔 ≤ mergeGapBars」聚成一波，
+  // 波峰根（放量倍数最大者）作为标注位置，整波累计成交额参与强度分级。
+  // 这与秒级 tickImpulse 的 episode 合并是同一套思路，两个通道的呈现保持一致。
+  const clusters = [];
+  for (const item of raw) {
+    const prev = clusters[clusters.length - 1];
+    const last = prev ? prev[prev.length - 1] : null;
+    if (last && item.direction === last.direction && item.index - last.index <= params.mergeGapBars) {
+      prev.push(item);
+    } else {
+      clusters.push([item]);
+    }
+  }
+
+  const events = [];
+  for (const cluster of clusters) {
+    const rep = cluster.reduce((best, item) => (item.ratio > best.ratio ? item : best), cluster[0]);
+    const sumAmount = cluster.reduce((sum, item) => sum + (item.amount ?? 0), 0);
+    const graded = gradeIntensity({ ratio: rep.ratio, z: rep.z });
+
+    // 双轨分级（依据 2026-10-30 / 11-02 两日实测方向命中率，见 reports/volume-surge-backtest.md）：
+    //
+    //   有突破确认            → 按量能强度 L1~L3       命中 54~59%
+    //   无确认但当日成交额峰值 → 固定 L2                 命中 55~59%
+    //   无确认且非峰值        → L1，只在图上标注         命中 47%（等同随机）
+    //
+    // 「当日峰值」这一档是专门为「最大那根柱子」加的：它没有突破区间，但金额规模
+    // 本身就是信息（1448 万单分钟、全天之最），误报代价远低于漏报。
+    const confirmed = rep.confirm === 'break' || rep.confirm === 'touch';
+    // 「当日峰值」按整波累计额判定：这一波成交的钱比今天此前任何一分钟都多。
+    // 用单根比较会漏掉「连续 4 根 500 万」这种总量更大、但单根不显眼的波次。
+    const dayPeak =
+      params.peakBoost &&
+      rep.direction === 'surge' &&
+      sumAmount > 0 &&
+      sumAmount >= amountPrefixMax[cluster[0].index];
+
+    let level;
+    if (confirmed) {
+      // 突破 + 当日成交额峰值 = 强：两日回测方向命中 64%/65%，是唯一值得即时推送的组合。
+      // 旧口径下「强」只靠倍数（57%），倍数高并不等于方向对。
+      level = dayPeak ? 3 : graded.level;
+    } else {
+      level = dayPeak ? 2 : 1;
+    }
+
+    // 量能方向与价格方向相反（放量下跌）降一级：那是承接被砸，不是资金进攻
+    if (rep.align === false) level = Math.max(1, level - 1);
+
+    events.push({
+      ...rep,
+      score: graded.score,
+      level,
+      levelLabel: LEVEL_LABELS[level],
+      /** 是否有价格突破确认（break/touch）：决定能否进入强级与即时推送 */
+      confirmed,
+      /** 该分钟成交额是否创当日至今新高（当日最大那根柱子） */
+      dayPeak,
+      /** 整波累计成交额（元），仅作展示与回溯，不参与分级 */
+      sumAmount: sumAmount || null,
+      /** 本波包含的爆量分钟数，1 表示孤立单根 */
+      mergedBars: cluster.length,
+      spanFrom: cluster[0].minute,
+      spanTo: cluster[cluster.length - 1].minute,
+    });
   }
 
   const totalVolume = tradable.reduce((sum, bar) => sum + Number(bar.volume), 0);
   for (const event of events) {
     event.volumeShare = totalVolume > 0 ? event.volume / totalVolume : null;
+  }
+
+  const confirmCounts = { break: 0, touch: 0, move: 0, edge: 0, none: 0 };
+  const levelCounts = { 1: 0, 2: 0, 3: 0 };
+  for (const event of events) {
+    confirmCounts[event.confirm] += 1;
+    levelCounts[event.level] += 1;
   }
 
   return {
@@ -300,6 +478,8 @@ export function detectVolumeSurge(bars, options = {}) {
       surgeCount: events.filter((event) => event.direction === 'surge').length,
       drainCount: events.filter((event) => event.direction === 'drain').length,
       skipped: skipped.length,
+      confirmCounts,
+      levelCounts,
     },
   };
 }

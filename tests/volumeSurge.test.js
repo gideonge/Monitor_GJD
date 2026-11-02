@@ -81,6 +81,8 @@ test('U 型量能结构（开盘/尾盘放量）不会成片误报', () => {
 });
 
 test('平稳序列中注入单分钟放量能被检出，且倍数与等级正确', () => {
+  // 价格一分不动（一字横盘）的极端放量：能检出、能定位，但没有方向确认，
+  // 因此按「观察级」标注并标记 dayPeak，而不是直接判成「强」。
   const bars = buildBars({ volumeAt: { '10:15': 20000 } });
   const { events } = detectVolumeSurge(bars);
   assert.equal(events.length, 1);
@@ -89,7 +91,20 @@ test('平稳序列中注入单分钟放量能被检出，且倍数与等级正�
   assert.equal(event.direction, 'surge');
   assert.ok(event.ratio > 15, `倍数应接近 20，实际 ${event.ratio}`);
   assert.ok(event.z > 4);
-  assert.equal(event.level, 3, '极端放量应为 3 级');
+  assert.equal(event.confirmed, false, '价格无量变动，不能算方向确认');
+  assert.equal(event.dayPeak, true, '当日最大成交额，应标记峰值');
+  assert.equal(event.level, 2, '未确认但为当日峰值，应为 2 级');
+});
+
+test('价格突破 + 极端放量：确认后升为 3 级', () => {
+  const priceAt = {};
+  for (const minute of allMinutes()) priceAt[minute] = 4;
+  const bars = buildBars({ volumeAt: { '10:15': 20000 }, priceAt: { ...priceAt, '10:15': 4.08 } });
+  const { events } = detectVolumeSurge(bars);
+  assert.equal(events.length, 1);
+  assert.equal(events[0].confirm, 'break');
+  assert.equal(events[0].confirmed, true);
+  assert.equal(events[0].level, 3);
 });
 
 test('基线窗口不跨越午休：下午开盘的量能水平不拿上午做参照', () => {
@@ -117,15 +132,17 @@ test('关闭骤减检测后不再报枯竭', () => {
   assert.equal(events.length, 0);
 });
 
-test('冷却期内不重复告警', () => {
-  // 10:15 与 10:18 相隔 3 分钟，小于默认冷却 5 分钟，应只保留首个
+test('同一波行情里相邻的爆量分钟合并为一处', () => {
+  // 10:15 与 10:18 相隔 3 分钟，属于同一波，合并为一条（标注在放量最大的那根）
   const bars = buildBars({ volumeAt: { '10:15': 20000, '10:18': 20000 } });
   const { events } = detectVolumeSurge(bars);
   assert.equal(events.length, 1);
-  assert.equal(events[0].minute, '10:15');
+  assert.equal(events[0].spanFrom, '10:15');
+  assert.equal(events[0].spanTo, '10:18');
+  assert.equal(events[0].mergedBars, 2);
 
-  const { events: spaced } = detectVolumeSurge(bars, { cooldownBars: 0 });
-  assert.equal(spaced.length, 2);
+  const { events: split } = detectVolumeSurge(bars, { mergeGapBars: 0 });
+  assert.equal(split.length, 2, '关掉合并后应各自成条');
 });
 
 test('绝对成交额门槛过滤地量噪声', () => {
@@ -147,22 +164,33 @@ test('区间突破确认：只保留价格同向突破前高的放量', () => {
   for (const minute of allMinutes()) priceAt[minute] = 4;
   priceAt['10:12'] = 4.02;
 
-  const plain = detectVolumeSurge(buildBars({ volumeAt, priceAt }), { cooldownBars: 0 });
-  assert.equal(plain.events.length, 2, '不加确认时应报 2 个');
+  // 分级口径（默认）：两根都留下，未突破的那根降为观察级
+  const plain = detectVolumeSurge(buildBars({ volumeAt, priceAt }), { mergeGapBars: 0 });
+  assert.equal(plain.events.length, 2, '默认口径下两根都应标注');
+  assert.equal(plain.events.find((event) => event.minute === '10:11').confirmed, false);
+  assert.equal(plain.events.find((event) => event.minute === '10:12').confirmed, true);
 
+  // 严格口径（confirmMode=break）：只保留突破那一根
   const strict = detectVolumeSurge(buildBars({ volumeAt, priceAt }), {
     requireRangeBreak: true,
-    cooldownBars: 0,
+    mergeGapBars: 0,
   });
   assert.equal(strict.events.length, 1, '区间突破确认后只保留突破那一根');
   assert.equal(strict.events[0].minute, '10:12');
   assert.ok(strict.events[0].tickRet > 0);
 });
 
-test('价格位移门槛过滤无方向的被动放量', () => {
+test('无价格位移的放量降级为观察级，而不是被丢弃', () => {
+  // 2026-11-02 修订：旧版在这里直接丢掉事件，导致全天最大的爆量在图上没有标记
   const bars = buildBars({ volumeAt: { '10:20': 20000 } });
-  assert.equal(detectVolumeSurge(bars).events.length, 1);
-  assert.equal(detectVolumeSurge(bars, { minTickPct: 0.05 }).events.length, 0);
+  const loose = detectVolumeSurge(bars);
+  assert.equal(loose.events.length, 1);
+  assert.equal(loose.events[0].confirm, 'none');
+  assert.equal(loose.events[0].confirmed, false);
+
+  // 只有在显式要求价格确认时才丢弃
+  const strict = detectVolumeSurge(bars, { requireConfirm: true });
+  assert.equal(strict.events.length, 0);
 });
 
 test('开盘头几分钟基线不足时不做判定', () => {

@@ -391,6 +391,10 @@ export function drawIntradayChart(
   /**
    * 量能突变标注：竖向参考线贯穿价格区与量能区，价格线上打点。
    * 只有落在当前分钟序列里的事件才画（事件可能来自另一交易日）。
+   *
+   * 2026-11-02 修订：事件分「已确认（价格突破）」与「观察（区间内堆量）」两类。
+   * 后者以前根本不画，导致全天最大那根柱子在图上没有任何标记。现在用空心点 +
+   * 更淡的竖线表示「看到放量了，但价格没给出方向」，合并成一波的用横杠标出区间。
    */
   const eventByMinute = new Map();
   for (const item of events ?? []) {
@@ -403,16 +407,32 @@ export function drawIntradayChart(
           if (!hit) return '';
           const px = xOf(index);
           const py = yOf(bar.price);
-          const radius = hit.level >= 3 ? 3.6 : 2.6;
+          const confirmed = hit.confirmed !== false;
+          const radius = hit.level >= 3 ? 3.6 : hit.level === 2 ? 3 : 2.4;
           const dash = hit.direction === 'drain' ? '2 3' : '4 3';
+          const lineOpacity = confirmed ? 0.3 : 0.16;
+          const dotFill = confirmed ? COLOR.accent : '#fff';
+          const dotStroke = confirmed ? '#fff' : COLOR.accent;
+          // 合并波次：从波头到波尾画一段浅色横杠，说明这是一整段而不是孤立一根
+          let spanBar = '';
+          if (Number(hit.mergedBars) > 1 && hit.spanFrom && hit.spanTo) {
+            const fromIndex = bars.findIndex((item) => item.minute === hit.spanFrom);
+            const toIndex = bars.findIndex((item) => item.minute === hit.spanTo);
+            if (fromIndex >= 0 && toIndex >= 0) {
+              const x1 = xOf(fromIndex);
+              const x2 = xOf(toIndex);
+              spanBar = `<rect x="${x1.toFixed(1)}" y="${(volTop + volH - 3).toFixed(1)}" width="${(
+                x2 - x1
+              ).toFixed(1)}" height="2" fill="${COLOR.accent}" opacity="0.55" />`;
+            }
+          }
           return `<g>
+        ${spanBar}
         <line x1="${px.toFixed(1)}" x2="${px.toFixed(1)}" y1="${priceTop}" y2="${(volTop + volH).toFixed(
           1,
-        )}" stroke="${COLOR.accent}" stroke-width="1" stroke-dasharray="${dash}" opacity="0.3" />
-        <circle cx="${px.toFixed(1)}" cy="${py.toFixed(1)}" r="${radius}" fill="${
-          COLOR.accent
-        }" stroke="#fff" stroke-width="1.3" opacity="0.95"><title>${escapeHtml(
-          `${bar.minute} 量能 ${Number(hit.ratio).toFixed(1)}× 近 20 分钟基线（${hit.levelLabel ?? ''}）`,
+        )}" stroke="${COLOR.accent}" stroke-width="1" stroke-dasharray="${dash}" opacity="${lineOpacity}" />
+        <circle cx="${px.toFixed(1)}" cy="${py.toFixed(1)}" r="${radius}" fill="${dotFill}" stroke="${dotStroke}" stroke-width="1.3" opacity="0.95"><title>${escapeHtml(
+          `${bar.minute} 量能 ${Number(hit.ratio).toFixed(1)}× 近 20 分钟基线（${hit.levelLabel ?? ''}${confirmed ? '' : '，方向待确认'}）`,
         )}</title></circle>
       </g>`;
         })
@@ -482,10 +502,28 @@ export function drawIntradayChart(
     const pct = base > 0 ? ((bar.price - base) / base) * 100 : 0;
     const cls = pct > 0 ? '#ff3b2f' : pct < 0 ? '#00a06a' : '#ffffff';
     const hit = eventByMinute.get(bar.minute);
+    const confirmLabel = {
+      break: '突破前 20 分钟极值',
+      touch: '贴前 20 分钟极值报收',
+      move: '价格位移确认',
+      edge: '收在当分钟极值侧',
+      none: '区间内堆量 · 方向待确认',
+    }[hit?.confirm];
     const surgeText = hit
       ? `<br/><b style="color:#9fc0e6">量能 ${Number(hit.ratio).toFixed(1)}× 基线 · ${
           hit.direction === 'drain' ? '骤减' : '突变'
-        }${hit.levelLabel ? `（${hit.levelLabel}）` : ''}</b>`
+        }${hit.levelLabel ? `（${hit.levelLabel}）` : ''}</b>${
+          confirmLabel ? `<br/><span style="color:#9fc0e6">${confirmLabel}</span>` : ''
+        }${
+          hit.dayPeak ? '<br/><span style="color:#9fc0e6">当日单分钟成交额峰值</span>' : ''
+        }${
+          Number(hit.mergedBars) > 1
+            ? `<br/><span style="color:#9fc0e6">本波 ${hit.mergedBars} 根（${hit.spanFrom}–${hit.spanTo}）累计 ${fmtAmount(
+                hit.sumAmount,
+                { sign: false },
+              )}</span>`
+            : ''
+        }`
       : '';
     tooltip.classList.add('is-on');
     tooltip.innerHTML = `${escapeHtml(bar.minute)}　<b style="color:${cls}">${bar.price.toFixed(3)} ${

@@ -70,6 +70,33 @@ function makeRandom(seed = 20261030) {
 // ---------------------------------------------------------------- 数据装载
 
 function loadSamples() {
+  // --db-date=YYYY-MM-DD：直接从本地库读某一交易日的分时（含 high/low，确认逻辑需要）。
+  // 本地库是唯一同时覆盖两天的来源，跨日对比必须走这条路。
+  const dbDate = argValue('db-date', null);
+  if (dbDate) {
+    const db = new DatabaseSync(config.dbFile, { readOnly: true });
+    const codes = db.prepare('SELECT DISTINCT code FROM intraday_bar WHERE trade_date = ?').all(dbDate);
+    const series = [];
+    for (const { code } of codes) {
+      const bars = db
+        .prepare(
+          'SELECT minute, open, close, high, low, volume, amount FROM intraday_bar WHERE code = ? AND trade_date = ? ORDER BY minute ASC',
+        )
+        .all(code, dbDate);
+      if (bars.length < 30) continue;
+      const meta = db.prepare('SELECT name, category FROM etf WHERE code = ?').get(code);
+      series.push({
+        code,
+        name: meta?.name ?? code,
+        category: meta?.category ?? '其他',
+        tradeDate: dbDate,
+        bars,
+      });
+    }
+    db.close();
+    return { tradeDate: dbDate, series: series.sort((a, b) => a.code.localeCompare(b.code)) };
+  }
+
   const samplePath =
     argValue('samples', null) ??
     path.join(config.dataDir, 'samples', 'intraday-2026-10-30.json');
@@ -88,23 +115,25 @@ function loadSamples() {
     });
   }
 
-  // 本地库里可能有样本文件没覆盖到的标的（详情页回填过的），合并进来补齐横截面
-  if (fs.existsSync(config.dbFile)) {
+  // 本地库里可能有样本文件没覆盖到的标的（详情页回填过的），合并进来补齐横截面。
+  // 必须锁定样本文件那一天：库里同时存着多个交易日，混进来会让日内口径失效。
+  const sampleDate = payload.samples[0]?.tradeDate;
+  if (fs.existsSync(config.dbFile) && sampleDate) {
     const db = new DatabaseSync(config.dbFile, { readOnly: true });
-    const rows = db.prepare('SELECT DISTINCT code, trade_date FROM intraday_bar').all();
+    const rows = db.prepare('SELECT DISTINCT code FROM intraday_bar WHERE trade_date = ?').all(sampleDate);
     for (const row of rows) {
       if (byCode.has(row.code)) continue;
       const bars = db
         .prepare(
-          'SELECT minute, close, volume, amount FROM intraday_bar WHERE code = ? AND trade_date = ? ORDER BY minute ASC',
+          'SELECT minute, open, close, high, low, volume, amount FROM intraday_bar WHERE code = ? AND trade_date = ? ORDER BY minute ASC',
         )
-        .all(row.code, row.trade_date);
+        .all(row.code, sampleDate);
       const meta = db.prepare('SELECT name, category FROM etf WHERE code = ?').get(row.code);
       byCode.set(row.code, {
         code: row.code,
         name: meta?.name ?? row.code,
         category: meta?.category ?? '其他',
-        tradeDate: row.trade_date,
+        tradeDate: sampleDate,
         bars,
       });
     }
@@ -537,12 +566,14 @@ function main() {
   console.log('| 组合 | 事件数 | 每标的每日 | 方向命中 | p | 同向15min收益 | 对照 | p | 量能延续 | 15min\\|收益\\| |');
   console.log('|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|');
   const confirmations = [
-    ['裸信号', {}],
-    ['+ 位移 ≥0.05%', { minTickPct: 0.05 }],
-    ['+ 区间突破', { requireRangeBreak: true }],
-    ['+ 区间突破 + 额≥50万', { requireRangeBreak: true, minAmount: 500_000 }],
-    ['+ 区间突破 + 额≥100万', { requireRangeBreak: true, minAmount: 1_000_000 }],
-    ['+ 连续 2 根', { persistBars: 2 }],
+    ['裸信号（无价格确认）', { requireConfirm: false, mergeGapBars: 0 }],
+    ['裸信号 + 同波合并', { requireConfirm: false }],
+    ['旧线上：严格区间突破', { requireRangeBreak: true, mergeGapBars: 0 }],
+    ['旧线上 + 同波合并', { requireRangeBreak: true }],
+    ['★ 新线上：分级确认 + 合并', {}],
+    ['新口径（不合并）', { mergeGapBars: 0 }],
+    ['新口径 + 额≥300万', { minAmount: 3_000_000 }],
+    ['新口径 + 额≥300万 + 位移 0.2%', { minAmount: 3_000_000, minTickPct: 0.2 }],
   ];
   const confirmResults = [];
   for (const [label, params] of confirmations) {
@@ -559,7 +590,7 @@ function main() {
   console.log('稳健性检验（按标的整簇重抽样 2000 次，95% 区间）：');
   console.log('| 组合 | 参与标的 | 同向收益均值 | 95% 区间 | >0 概率 | 方向命中 | 95% 区间 |');
   console.log('|---|---:|---:|---|---:|---:|---|');
-  for (const label of ['裸信号', '+ 区间突破']) {
+  for (const label of ['裸信号（无价格确认）', '旧线上：严格区间突破', '★ 新线上：分级确认 + 合并']) {
     const result = confirmResults.find((item) => item.label === label);
     if (!result) continue;
     const signed = clusterBootstrap(result.eventRows, 'signedRet', { seed: 7 });

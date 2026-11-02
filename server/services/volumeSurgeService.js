@@ -43,11 +43,25 @@ export function createVolumeSurgeService({ repos, events, logger, options = {} }
     lastResult: null,
   };
 
+  /**
+   * 实际生效的确认模式。
+   * 兼容旧配置/旧测试里的 requireRangeBreak：显式 true 等价于 break 档，
+   * 其余情况读 confirmMode（graded 默认 / strict）。
+   */
+  function effectiveMode() {
+    if (vs.requireRangeBreak) return 'break';
+    return vs.confirmMode ?? 'graded';
+  }
+
   /** 只把真正影响检测结果的参数暴露给前端，附在事件里便于回溯当时的判定口径 */
   function publicParams() {
     return {
       baselineWindow: 20,
-      requireRangeBreak: vs.requireRangeBreak,
+      confirmMode: effectiveMode(),
+      minTickPct: vs.minTickPct,
+      edgeConfirm: vs.edgeConfirm,
+      peakBoost: vs.peakBoost,
+      mergeGapBars: vs.mergeGapBars,
       minAmount: vs.minAmount,
       minAlertLevel: vs.minAlertLevel,
       backfillMinLevel: vs.backfillMinLevel,
@@ -56,7 +70,19 @@ export function createVolumeSurgeService({ repos, events, logger, options = {} }
   }
 
   function detectorParams() {
-    return { requireRangeBreak: vs.requireRangeBreak, minAmount: vs.minAmount };
+    const params = {
+      minAmount: vs.minAmount,
+      minTickPct: vs.minTickPct,
+      edgeConfirm: vs.edgeConfirm,
+      peakBoost: vs.peakBoost,
+      mergeGapBars: vs.mergeGapBars,
+    };
+    // confirmMode 是面向人的三档开关，检测器只认两个布尔开关
+    const mode = effectiveMode();
+    if (mode === 'break') params.requireRangeBreak = true;
+    else if (mode === 'strict') params.requireConfirm = true;
+    else params.requireConfirm = false;
+    return params;
   }
 
   /**
@@ -70,6 +96,11 @@ export function createVolumeSurgeService({ repos, events, logger, options = {} }
     }
 
     const { events: found, stats } = detectVolumeSurge(bars, detectorParams());
+    if (stats?.confirmCounts) {
+      const confirmed = stats.confirmCounts.break + stats.confirmCounts.touch;
+      stats.confirmedCount = confirmed;
+      stats.watchCount = stats.eventCount - confirmed;
+    }
     return {
       tradeDate,
       params: publicParams(),
@@ -79,6 +110,8 @@ export function createVolumeSurgeService({ repos, events, logger, options = {} }
         eventCount: stats.eventCount,
         surgeCount: stats.surgeCount,
         drainCount: stats.drainCount,
+        confirmedCount: stats.confirmedCount ?? 0,
+        watchCount: stats.watchCount ?? 0,
       },
       events: found.map((event) => ({
         minute: event.minute,
@@ -89,8 +122,19 @@ export function createVolumeSurgeService({ repos, events, logger, options = {} }
         ratio: event.ratio,
         baseline: event.baseline,
         volume: event.volume,
+        amount: event.amount,
+        sumAmount: event.sumAmount,
         price: event.price,
         tickRet: event.tickRet,
+        /** 价格确认方式：break 突破 / touch 贴前高报收 / move 位移 / edge 收在极值 / none */
+        confirm: event.confirm,
+        confirmed: event.confirmed,
+        dayPeak: event.dayPeak,
+        priceDir: event.priceDir,
+        align: event.align,
+        mergedBars: event.mergedBars,
+        spanFrom: event.spanFrom,
+        spanTo: event.spanTo,
         volumeShare: event.volumeShare,
       })),
     };
@@ -186,8 +230,13 @@ export function createVolumeSurgeService({ repos, events, logger, options = {} }
           }
         }
 
-        // 同一规则单轮限量：按倍数降序，保证配额留给最强的信号
-        ruleCandidates.sort((a, b) => b.event.ratio - a.event.ratio);
+        // 同一规则单轮限量：先确认类、再等级、再倍数，保证配额留给最硬的信号
+        ruleCandidates.sort(
+          (a, b) =>
+            Number(b.event.confirmed) - Number(a.event.confirmed) ||
+            b.event.level - a.event.level ||
+            b.event.ratio - a.event.ratio,
+        );
         candidates.push(...ruleCandidates.slice(0, config.alertMaxPerRulePerCycle));
       }
 
@@ -196,7 +245,7 @@ export function createVolumeSurgeService({ repos, events, logger, options = {} }
         alertRepo,
         events,
         logger: log,
-        params: { baselineWindow: 20, requireRangeBreak: vs.requireRangeBreak },
+        params: { baselineWindow: 20, confirmMode: vs.confirmMode, minTickPct: vs.minTickPct },
         now,
       });
 

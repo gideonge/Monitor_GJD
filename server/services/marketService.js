@@ -1,5 +1,7 @@
 import { config } from '../config/index.js';
 import { fetchEtfUniverse, fetchQuotes, fetchDailyFlow, getBreakerState, isBreakerOpen } from '../providers/eastmoney.js';
+import { fetchEtfUniverseFromSina } from '../providers/sina.js';
+import { fetchMinuteQuotes } from '../providers/tencent.js';
 import { classifyEtf } from '../lib/classify.js';
 import { tradeDateOf, marketPhase, PHASE_LABEL } from '../lib/time.js';
 import { mapPool, chunk } from '../lib/concurrency.js';
@@ -27,6 +29,10 @@ export function createMarketService({ db, repos, events, logger }) {
     aggregate: stateRepo.getState('marketAggregate') ?? null,
     quotes: new Map(),
     universeRows: [],
+    // 实际生效的数据源。东财 push2 对机房 IP 常直接 reset，不能假设它一定可用，
+    // 所以这里记录「这一轮到底是谁提供的」，由前端如实展示，不写死成东方财富。
+    universeSource: stateRepo.getState('universeSource') ?? 'eastmoney',
+    quoteSource: stateRepo.getState('quoteSource') ?? 'eastmoney',
     busy: { universe: false, tick: false, daily: false },
   };
 
@@ -94,12 +100,40 @@ export function createMarketService({ db, repos, events, logger }) {
     return count;
   }
 
+  /**
+   * 拉清单：东财优先，失败即切新浪。
+   *
+   * 东财 push2 一旦被拦，不管重试多少次都是 UND_ERR_SOCKET，所以这里不在同一轮里等它
+   * 慢慢重试——直接降级。清单的作用只是「有哪些 ETF」，新浪给的信息足够；
+   * 缺的主力净流入由后续快照补。
+   */
+  async function loadUniverse() {
+    const problems = [];
+    if (!isBreakerOpen('quote')) {
+      try {
+        const result = await fetchEtfUniverse();
+        if (result.rows.length > 0) return { universe: result, source: 'eastmoney' };
+        problems.push('东财返回空');
+      } catch (error) {
+        problems.push(`东财 ${error.message}`);
+      }
+    } else {
+      problems.push('东财熔断中');
+    }
+
+    const fallback = await fetchEtfUniverseFromSina({
+      pageSize: config.upstream.pageSize,
+      maxPages: 20,
+    });
+    return { universe: fallback, source: 'sina', degraded: problems.join('；') };
+  }
+
   async function syncUniverse() {
     if (state.busy.universe) return { ok: false, reason: 'busy' };
     state.busy.universe = true;
     try {
       const started = Date.now();
-      const universe = await fetchEtfUniverse();
+      const { universe, source, degraded } = await loadUniverse();
       const now = Date.now();
       const rows = universe.rows.map((row) => ({ ...row, category: classifyEtf(row.name) }));
 
@@ -116,19 +150,30 @@ export function createMarketService({ db, repos, events, logger }) {
       state.trackedCount = trackedCodes.length;
       state.aggregate = computeAggregate(rows);
       state.lastUniverseAt = now;
+      state.universeSource = source;
 
       stateRepo.setState('lastUniverseAt', now, now);
       stateRepo.setState('universeTotal', rows.length, now);
       stateRepo.setState('trackedCount', trackedCodes.length, now);
       stateRepo.setState('marketAggregate', state.aggregate, now);
+      stateRepo.setState('universeSource', source, now);
+
+      if (degraded) log.warn('清单主源不可用，已降级', { source, detail: degraded });
 
       log.info('全市场 ETF 清单同步完成', {
         total: rows.length,
         tracked: trackedCodes.length,
+        source,
         durationMs: Date.now() - started,
       });
-      events.publish(EVENTS.STATUS, { type: 'universe', at: now, total: rows.length, tracked: trackedCodes.length });
-      return { ok: true, total: rows.length, tracked: trackedCodes.length };
+      events.publish(EVENTS.STATUS, {
+        type: 'universe',
+        at: now,
+        total: rows.length,
+        tracked: trackedCodes.length,
+        source,
+      });
+      return { ok: true, total: rows.length, tracked: trackedCodes.length, source };
     } catch (error) {
       state.lastError = { at: Date.now(), scope: 'universe', message: error.message };
       stateRepo.setState('lastError', state.lastError);
@@ -145,6 +190,38 @@ export function createMarketService({ db, repos, events, logger }) {
     return now;
   }
 
+  /**
+   * 拉快照：东财优先，失败即切腾讯批量快照。
+   *
+   * 两家返回的字段口径不同（东财给主力/超大单/大单分档，腾讯只有外盘/内盘），
+   * 转换在 providers/tencent.js 的 toMinuteQuoteRow 里做，折算成当日累计主动净买入额后
+   * 顶到同一个 mainNet 字段上，因此下游指标与规则完全不用改。
+   */
+  async function collectQuotes(tracked) {
+    const refs = tracked.map((row) => ({ code: row.code, market: row.market }));
+    const problems = [];
+
+    if (!isBreakerOpen('quote')) {
+      try {
+        const batches = chunk(refs, config.upstream.batchSize);
+        const quotes = [];
+        await mapPool(batches, 2, async (batch) => {
+          const result = await fetchQuotes(batch);
+          quotes.push(...result);
+        });
+        if (quotes.length > 0) return { quotes, source: 'eastmoney' };
+        problems.push('东财返回空');
+      } catch (error) {
+        problems.push(`东财 ${error.message}`);
+      }
+    } else {
+      problems.push('东财熔断中');
+    }
+
+    const fallback = await fetchMinuteQuotes(refs);
+    return { quotes: fallback, source: 'tencent', degraded: problems.join('；') };
+  }
+
   async function tick() {
     if (state.busy.tick) return { ok: false, reason: 'busy' };
     state.busy.tick = true;
@@ -152,12 +229,12 @@ export function createMarketService({ db, repos, events, logger }) {
       const tracked = etfRepo.listTracked();
       if (tracked.length === 0) return { ok: true, inserted: 0, skipped: 'empty-universe' };
 
-      const batches = chunk(tracked, config.upstream.batchSize);
-      const quotes = [];
-      await mapPool(batches, 2, async (batch) => {
-        const result = await fetchQuotes(batch.map((row) => ({ code: row.code, market: row.market })));
-        quotes.push(...result);
-      });
+      const { quotes, source: quoteSource, degraded } = await collectQuotes(tracked);
+      // 腾讯快照不带可用名称（GBK），统一沿用库内名称，避免详情页标题变空白
+      const nameByCode = new Map(tracked.map((row) => [row.code, row.name]));
+      for (const quote of quotes) {
+        if (!quote.name) quote.name = nameByCode.get(quote.code) ?? null;
+      }
 
       const now = Date.now();
       const rows = quotes.map((quote) => {
@@ -175,7 +252,7 @@ export function createMarketService({ db, repos, events, logger }) {
           price: quote.price,
           pctChg: quote.pctChg,
           turnover: quote.turnover,
-          source: 'live',
+          source: quoteSource === 'eastmoney' ? 'live' : `live-${quoteSource}`,
         };
       });
 
@@ -187,7 +264,10 @@ export function createMarketService({ db, repos, events, logger }) {
       for (const quote of quotes) state.quotes.set(quote.code, quote);
 
       state.lastTickAt = now;
+      state.quoteSource = quoteSource;
       stateRepo.setState('lastTickAt', now, now);
+      stateRepo.setState('quoteSource', quoteSource, now);
+      if (degraded) log.warn('快照主源不可用，已降级', { source: quoteSource, detail: degraded });
 
       // 只在交易时段做盘中阈值判定，避免用陈旧快照误判「急流」
       const phase = marketPhase(now);
@@ -203,10 +283,11 @@ export function createMarketService({ db, repos, events, logger }) {
         inserted,
         quotes: tracked.length,
         alerts: alerts.length,
+        source: quoteSource,
       });
 
-      log.info('快照采集完成', { quotes: quotes.length, inserted, phase, alerts: alerts.length });
-      return { ok: true, inserted, alerts: alerts.length, phase };
+      log.info('快照采集完成', { quotes: quotes.length, inserted, phase, alerts: alerts.length, source: quoteSource });
+      return { ok: true, inserted, alerts: alerts.length, phase, source: quoteSource };
     } catch (error) {
       state.lastError = { at: Date.now(), scope: 'tick', message: error.message };
       stateRepo.setState('lastError', state.lastError);
@@ -357,6 +438,39 @@ export function createMarketService({ db, repos, events, logger }) {
     return removed;
   }
 
+  const SOURCE_LABEL = { eastmoney: '东方财富', sina: '新浪', tencent: '腾讯' };
+
+  /**
+   * 数据源描述：必须是「实际生效的」，不能写死。
+   * 前端顶部那颗来源芯片直接读它，用户一眼能看出当前是不是降级状态。
+   */
+  function describeSource() {
+    const { universeSource, quoteSource } = state;
+    const degraded = universeSource !== 'eastmoney' || quoteSource !== 'eastmoney';
+    if (!degraded) {
+      return {
+        name: '东方财富',
+        provider: 'eastmoney',
+        mode: 'live',
+        universeSource,
+        quoteSource,
+        fields: ['主力净流入', '超大单', '大单', '中单', '小单', '成交额'],
+        note: null,
+      };
+    }
+    const parts = [SOURCE_LABEL[universeSource] ?? universeSource];
+    if (quoteSource !== universeSource) parts.push(SOURCE_LABEL[quoteSource] ?? quoteSource);
+    return {
+      name: `${parts.join(' / ')} · 主动净买额口径`,
+      provider: quoteSource,
+      mode: 'degraded',
+      universeSource,
+      quoteSource,
+      fields: quoteSource === 'eastmoney' ? ['主力净流入', '成交额'] : ['主动净买额', '成交额'],
+      note: '主力净流入不可用（东财实时行情拒绝当前出口 IP），净额字段改为（外盘−内盘）×100×现价的当日累计值',
+    };
+  }
+
   function getStatus() {
     const phase = marketPhase();
     const quoteTsList = [...state.quotes.values()].map((row) => row.quoteTs ?? 0);
@@ -377,12 +491,7 @@ export function createMarketService({ db, repos, events, logger }) {
       latestQuoteTs,
       quoteAgeMs: latestQuoteTs > 0 ? Date.now() - latestQuoteTs : null,
       breaker: getBreakerState(),
-      dataSource: {
-        name: '东方财富',
-        provider: 'eastmoney',
-        mode: 'live',
-        fields: ['主力净流入', '超大单', '大单', '中单', '小单', '成交额'],
-      },
+      dataSource: describeSource(),
       busy: { ...state.busy },
     };
   }

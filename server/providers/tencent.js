@@ -182,3 +182,132 @@ export async function fetchFastQuotes(refs) {
     throw error;
   }
 }
+
+// ---------------------------------------------------------------------------
+// 分钟级快照备源
+// ---------------------------------------------------------------------------
+
+/**
+ * 分钟级备源用它自己的熔断档。
+ *
+ * 复用 'fast' 那一个会让两件事耦合：分钟级被限流熔断后，秒级通道会跟着停摆，
+ * 反之亦然。两条链路的上游压力完全不同，必须分开计失败次数。
+ */
+const minuteBreaker = { failures: 0, openUntil: 0, lastError: null, lastSuccessAt: 0 };
+
+export function isMinuteBreakerOpen() {
+  return Date.now() < minuteBreaker.openUntil;
+}
+
+export function getMinuteBreakerState() {
+  return {
+    open: Date.now() < minuteBreaker.openUntil,
+    openUntil: minuteBreaker.openUntil,
+    failures: minuteBreaker.failures,
+    threshold: THRESHOLD,
+    cooldownMs: COOLDOWN_MS,
+    lastError: minuteBreaker.lastError,
+    lastSuccessAt: minuteBreaker.lastSuccessAt,
+  };
+}
+
+function minuteRecordSuccess() {
+  minuteBreaker.failures = 0;
+  minuteBreaker.openUntil = 0;
+  minuteBreaker.lastError = null;
+  minuteBreaker.lastSuccessAt = Date.now();
+}
+
+function minuteRecordFailure(error) {
+  minuteBreaker.failures += 1;
+  minuteBreaker.lastError = error?.message ?? 'unknown';
+  if (minuteBreaker.failures >= THRESHOLD) minuteBreaker.openUntil = Date.now() + COOLDOWN_MS;
+}
+
+/**
+ * 把腾讯逐笔快照折算成「与东财同构」的行情行。
+ *
+ * 关键换算：`(外盘 − 内盘) × 100 × 现价`。
+ * 外盘/内盘是当日累计的主动买/卖手数，因此这个差值天然就是**当日累计主动净买入额**，
+ * 与东财 f62（当日累计主力净流入）在形态与量纲上一致，可以直接顶到 mainNet 字段上，
+ * 下游全部指标（窗口净额、连续流入、量比…）不需要改。
+ *
+ * 口径差异必须说清楚：东财的「主力」= 大单 + 超大单；这里的「主动净买」= 全部主动买 − 全部主动卖。
+ * 后者包含中小单，数值通常比主力口径略大，方向一致。数据源标识会带出去，前端据此标注。
+ */
+export function toMinuteQuoteRow(parsed, market) {
+  if (!parsed || !/^\d{6}$/.test(parsed.code ?? '')) return null;
+  const { price } = parsed;
+  if (!(price > 0)) return null;
+
+  const hasFlow = Number.isFinite(parsed.outer) && Number.isFinite(parsed.inner);
+  const net = hasFlow ? (parsed.outer - parsed.inner) * 100 * price : null;
+
+  return {
+    code: parsed.code,
+    market,
+    name: null, // 腾讯返回 GBK 名称，解码后是乱码；名称一律沿用库内既有值
+    price,
+    pctChg: parsed.pctChg ?? 0,
+    turnover: parsed.amount ?? 0,
+    mainNet: net,
+    mainRatio: null,
+    superNet: null,
+    bigNet: null,
+    midNet: null,
+    smallNet: null,
+    quoteTs: parsed.ts ?? null,
+    outer: parsed.outer,
+    inner: parsed.inner,
+  };
+}
+
+const MINUTE_BATCH_SIZE = 50;
+
+/**
+ * 批量分钟级快照（备源）。
+ *
+ * 一次最多 50 个代码，URL 约 500 字符；超过就分批，避免请求行过长被网关拒绝。
+ * @param {Array<{code: string, market: number}>} refs
+ */
+export async function fetchMinuteQuotes(refs) {
+  const valid = (refs ?? []).filter((item) => /^\d{6}$/.test(item.code ?? ''));
+  if (valid.length === 0) return [];
+
+  if (isMinuteBreakerOpen()) {
+    throw upstream('分钟级备源熔断中', {
+      reason: 'circuit_open',
+      scope: 'tencent-minute',
+      retryAfterMs: minuteBreaker.openUntil - Date.now(),
+    });
+  }
+
+  const rows = [];
+  for (let start = 0; start < valid.length; start += MINUTE_BATCH_SIZE) {
+    const batch = valid.slice(start, start + MINUTE_BATCH_SIZE);
+    const symbols = batch.map((item) => `${item.market === 1 ? 'sh' : 'sz'}${item.code}`).join(',');
+    try {
+      const text = await getText(`${FAST_BASE}${symbols}`, {
+        headers: { 'User-Agent': UA, Referer: 'https://gu.qq.com/' },
+        timeoutMs: config.requestTimeoutMs,
+      });
+      const parsedRows = batch.length === 1 ? [parseFastQuoteLine(text)].filter(Boolean) : parseFastQuoteText(text);
+      const marketByCode = new Map(batch.map((item) => [item.code, item.market]));
+      for (const parsed of parsedRows) {
+        const row = toMinuteQuoteRow(parsed, marketByCode.get(parsed.code) ?? 0);
+        if (row) rows.push(row);
+      }
+    } catch (error) {
+      minuteRecordFailure(error);
+      throw error;
+    }
+  }
+
+  if (rows.length === 0) {
+    const empty = upstream('分钟级备源返回空数据', { reason: 'empty', scope: 'tencent-minute' });
+    minuteRecordFailure(empty);
+    throw empty;
+  }
+  minuteRecordSuccess();
+  return rows;
+}

@@ -182,13 +182,24 @@ function updateStatus(status) {
   if (status.breaker?.open) {
     messages.push('上游接口处于熔断保护中，将在冷却结束后自动恢复。');
   }
+  // 降级不提，用户会把「主动净买额」当成「主力净流入」看
+  if (status.dataSource?.mode === 'degraded') {
+    messages.push(status.dataSource.note ?? '当前为降级数据源，净额口径与主力净流入不同。');
+  }
   banner.textContent = messages.join(' ｜ ');
   banner.classList.toggle('is-on', messages.length > 0);
 
   const sourceChip = $('#source-chip');
+  const source = status.dataSource ?? null;
+  const degraded = source?.mode === 'degraded';
   const stale = status.quoteAgeMs && status.quoteAgeMs > 24 * 3600 * 1000;
-  sourceChip.textContent = stale ? '东方财富 · 收盘缓存' : '东方财富 · 资金流';
-  sourceChip.classList.toggle('is-warn', Boolean(stale));
+  if (degraded) {
+    sourceChip.textContent = `${source.name}${stale ? ' · 收盘缓存' : ''}`;
+  } else {
+    sourceChip.textContent = stale ? '东方财富 · 收盘缓存' : '东方财富 · 资金流';
+  }
+  sourceChip.title = source?.note ?? '数据来源';
+  sourceChip.classList.toggle('is-warn', Boolean(stale) || degraded);
 }
 
 // ---------------- 实时告警流 ----------------

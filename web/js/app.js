@@ -173,7 +173,18 @@ function updateStatus(status) {
 
   const banner = $('#banner');
   const messages = [];
-  const failedRecently = status.lastError && Date.now() - status.lastError.at < 10 * 60 * 1000;
+  // 只看「错误之后有没有成功过」：lastError 会一直留在状态里，光看时间窗会在数据已经
+  // 恢复正常后继续报警十分钟，用户会以为还在故障，实际早已恢复。
+  const recoveredAt = {
+    tick: status.lastTickAt,
+    universe: status.lastUniverseAt,
+    daily: status.lastDailyAt,
+  };
+  const recovered = status.lastError
+    ? (recoveredAt[status.lastError.scope] ?? 0) > status.lastError.at
+    : true;
+  const failedRecently =
+    status.lastError && !recovered && Date.now() - status.lastError.at < 10 * 60 * 1000;
   if (failedRecently) {
     messages.push(`数据源异常（${status.lastError.scope}）：${status.lastError.message}；当前展示最近一次成功采集的数据。`);
   } else if (status.quoteAgeMs && status.quoteAgeMs > 15 * 60 * 1000 && status.phase === 'trading') {

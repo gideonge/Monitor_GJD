@@ -159,6 +159,16 @@ export function createQueryService({ repos, marketService, intradayService, volu
     const surge = volumeSurgeService?.explain(code, intraday.tradeDate) ?? null;
     const flowPoints = flowRepo.intradaySeries(code, tradeDate);
 
+    /**
+     * 同一条累计曲线不能两种口径混着接。
+     * 一天里东财偶尔恢复几分钟、又断开，`active_net ?? main_net` 的写法
+     * 会让曲线在切换的那一分钟凭空跳一次，看起来像资金突然暴动。
+     * 折中做法：按当天哪种口径的采样点更多选定一种，另一种留空；
+     * 宁可曲线短一截，也不要在中途跳变。
+     */
+    const countOf = (key) => flowPoints.filter((row) => row[key] !== null && row[key] !== undefined).length;
+    const flowMetric = countOf('active_net') > countOf('main_net') ? 'activeNet' : 'mainNet';
+
     const { rows: alerts } = alertRepo.list({ code, limit: 20 });
 
     return {
@@ -193,9 +203,8 @@ export function createQueryService({ repos, marketService, intradayService, volu
       /** 盘中轮询累积的净流入分时（仅当天平台运行过才有值） */
       intradayFlow: flowPoints.map((row) => ({
         ts: row.ts,
-        // net 是主序列口径（主动净买优先），绘图与累计曲线一律用它；
-        // mainNet 保留东财原始主力净额，两列并存时各自取用
-        net: row.active_net ?? row.main_net,
+        // 主序列按 flowMetric 单口径取，缺失即留空，不与另一口径拼接
+        net: flowMetric === 'activeNet' ? row.active_net ?? null : row.main_net ?? null,
         mainNet: row.main_net,
         activeNet: row.active_net,
         superNet: row.super_net,
@@ -203,6 +212,8 @@ export function createQueryService({ repos, marketService, intradayService, volu
         pctChg: row.pct_chg,
         mainRatio: row.main_ratio,
       })),
+      /** 上面那条曲线用的是哪个口径，前端据此改标题 */
+      intradayFlowMetric: flowMetric,
       tradeDate,
       alerts,
     };

@@ -1,6 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { computeWindowMetrics, computeDailyMetrics, computeSurgeTimes } from '../server/services/metricService.js';
+import {
+  computeWindowMetrics,
+  computeDailyMetrics,
+  computeSurgeTimes,
+  resolveSeriesMetric,
+} from '../server/services/metricService.js';
 import { classifyEtf } from '../server/lib/classify.js';
 import { formatAmount } from '../server/lib/format.js';
 
@@ -82,4 +87,49 @@ test('金额格式化覆盖 亿 / 万 / 元 与负值', () => {
   assert.equal(formatAmount(880), '+880元');
   assert.equal(formatAmount(880, { sign: false }), '880元');
   assert.equal(formatAmount(null), '—');
+});
+
+// ---------------- 单口径锁定：两种净额不能混在一条序列里相减 ----------------
+
+test('序列口径：最新点是腾讯就整条取主动净买，东财点被剔除', () => {
+  const now = 1_700_000_000_000;
+  const points = [
+    // 东财那几分钟只写 main_net（主力净额 −10 亿）
+    { ts: now - 300_000, main_net: -1_000_000_000, active_net: null },
+    { ts: now - 240_000, main_net: -1_000_000_000, active_net: null },
+    // 腾讯那几分钟只写 active_net（主动净买 +70 亿）
+    { ts: now - 120_000, main_net: null, active_net: 6_900_000_000 },
+    { ts: now, main_net: null, active_net: 7_000_000_000 },
+  ];
+  assert.equal(resolveSeriesMetric(points), 'active_net');
+  const metrics = computeWindowMetrics(points, { windowSec: 300, now });
+  // 只有两个腾讯点参与，变动 = 1 亿；若混算会得到 80 亿的假急流
+  assert.equal(metrics.net_metric, 'active_net');
+  assert.equal(metrics.main_net, 7_000_000_000);
+  assert.equal(metrics.main_net_delta, 100_000_000);
+});
+
+test('序列口径：最新点是东财就只取主力净额，腾讯点被剔除', () => {
+  const now = 1_700_000_000_000;
+  const points = [
+    { ts: now - 240_000, main_net: null, active_net: 6_900_000_000 },
+    { ts: now - 120_000, main_net: -900_000_000, active_net: null },
+    { ts: now, main_net: -1_000_000_000, active_net: null },
+  ];
+  assert.equal(resolveSeriesMetric(points), 'main_net');
+  const metrics = computeWindowMetrics(points, { windowSec: 300, now });
+  assert.equal(metrics.net_metric, 'main_net');
+  assert.equal(metrics.main_net, -1_000_000_000);
+  assert.equal(metrics.main_net_delta, -100_000_000);
+});
+
+test('序列口径：整条都缺净额时返回 null，不伪造 0', () => {
+  const now = 1_700_000_000_000;
+  const points = [
+    { ts: now - 60_000, main_net: null, active_net: null },
+    { ts: now, main_net: null, active_net: null },
+  ];
+  assert.equal(resolveSeriesMetric(points), null);
+  assert.equal(computeWindowMetrics(points, { windowSec: 300, now }), null);
+  assert.equal(computeWindowMetrics([], { windowSec: 300, now }), null);
 });

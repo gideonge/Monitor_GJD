@@ -9,11 +9,30 @@ function mean(values) {
 }
 
 /**
- * 当日主序列口径：主动净买优先，缺了回落主力净额。
- * 与 marketService.effectiveNet 保持一致——派生指标必须锁定一个口径，
- * 否则源一换，序列上就出现几十亿的假跳变，急流告警全是假的。
+ * 当日主序列口径：整条序列只锁定一种口径，不逐点回落。
+ *
+ * 东财那一轮只写 main_net、腾讯那一轮只写 active_net，两列同源不同义。
+ * 若逐点「有哪个用哪个」，同一窗口的基线可能来自东财（主力净额 −10 亿）、
+ * 最新点来自腾讯（主动净买 +70 亿），减出来的 80 亿净流入全是假的。
+ * 所以按「最新一个采样点用的是哪一列」定口径，之后整条序列都只取那一列，
+ * 另一种列的点直接剔除——宁可点数少，也不要凭空跳变。
  */
-const netOf = (point) => point?.active_net ?? point?.main_net ?? null;
+function metricOf(point) {
+  if (!point) return null;
+  if (point.active_net !== null && point.active_net !== undefined) return 'active_net';
+  if (point.main_net !== null && point.main_net !== undefined) return 'main_net';
+  return null;
+}
+
+/** 该序列生效的口径；全空时返回 null */
+export function resolveSeriesMetric(points) {
+  const list = Array.isArray(points) ? points : [];
+  for (let i = list.length - 1; i >= 0; i -= 1) {
+    const metric = metricOf(list[i]);
+    if (metric) return metric;
+  }
+  return null;
+}
 
 /**
  * 盘中指标：以窗口起点为基线，计算窗口内净流入的变动额与速率。
@@ -21,9 +40,12 @@ const netOf = (point) => point?.active_net ?? point?.main_net ?? null;
  * 避免用「当日累计值」冒充「窗口变动」造成误报。
  */
 export function computeWindowMetrics(points, { windowSec = 300, now = Date.now() } = {}) {
-  // 只保留该口径有值的采样点：东财那一轮没有 active_net、腾讯那一轮没有 main_net，
-  // 混在一起减会得到 NaN 或凭空跳变
-  const series = (Array.isArray(points) ? points : []).filter((point) => netOf(point) !== null);
+  const all = Array.isArray(points) ? points : [];
+  const metric = resolveSeriesMetric(all);
+  if (!metric) return null;
+  const netOf = (point) => point[metric];
+  // 只保留该口径有值的采样点：另一种口径的点混进来减会凭空跳变
+  const series = all.filter((point) => netOf(point) !== null && netOf(point) !== undefined);
   if (series.length === 0) return null;
   const latest = series[series.length - 1];
   const cutoff = (latest.ts ?? now) - windowSec * 1000;
@@ -36,6 +58,8 @@ export function computeWindowMetrics(points, { windowSec = 300, now = Date.now()
 
   return {
     main_net: netOf(latest),
+    /** 本次计算实际使用的口径，便于上层把「主力净额」写对 */
+    net_metric: metric,
     main_net_delta: series.length > 1 ? delta : 0,
     main_net_rate: series.length > 1 ? rate : 0,
     main_net_ratio: latest.main_ratio ?? null,

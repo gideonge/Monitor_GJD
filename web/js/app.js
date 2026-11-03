@@ -92,6 +92,9 @@ function renderKpis(data) {
   }
   const trackedLabel = $('#kpi-tracked-label');
   if (trackedLabel) trackedLabel.textContent = `监控池${netLabel}`;
+  // 分类聚合走的是同一份 row.net，标题也必须跟着同一口径，否则图上标错。
+  const catNote = $('#cat-note');
+  if (catNote) catNote.textContent = `${netLabel === '主动净买' ? '主动净买' : '主力净额'}合计`;
 
   $('#kpi-market-net').innerHTML = `<span class="${signClass(market.totalMainNet)}">${fmtAmount(market.totalMainNet)}</span>`;
   $('#kpi-market-sub').innerHTML = `流入 <b>${fmtInt(market.inflow)}</b> 家 · 流出 <b>${fmtInt(

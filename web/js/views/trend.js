@@ -292,14 +292,21 @@ export function createTrendView({ toast }) {
     renderFast();
 
     const flow = latest.intradayFlow ?? [];
+    // 单口径序列里可能夹着 null（这一分钟另一种口径才有值），画之前剔掉：
+    // 留着会让折线在缺口处掉到 0，比不画更误导。
+    const flowPoints = flow
+      .filter((row) => row.net !== null && row.net !== undefined)
+      .map((row) => ({ ts: row.ts, value: row.net }));
     const block = $('#block-flow-intraday');
-    if (block) block.hidden = flow.length < 2;
-    if (flow.length >= 2) {
-      drawAreaChart(containerFlow, {
-        points: flow.map((row) => ({ ts: row.ts, value: row.net ?? row.mainNet })),
-        height: 180,
-      });
-      $('#chart-intraday-note').textContent = `${flow.length} 个采样点 · ${latest.tradeDate} 盘中轮询累积`;
+    if (block) block.hidden = flowPoints.length < 2;
+    if (flowPoints.length >= 2) {
+      // 只用服务端选定的那一种口径（net 已是单口径序列），
+      // 不再用 `?? mainNet` 兜底——那会让曲线在口径切换处跳一次。
+      const metric = latest.intradayFlowMetric === 'activeNet' ? '主动净买' : '主力净流入';
+      const title = $('#chart-intraday-title');
+      if (title) title.textContent = `盘中累计${metric}分时`;
+      drawAreaChart(containerFlow, { points: flowPoints, height: 180 });
+      $('#chart-intraday-note').textContent = `${flowPoints.length} 个采样点 · ${latest.tradeDate} 盘中轮询累积`;
     }
   }
 

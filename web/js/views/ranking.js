@@ -97,8 +97,18 @@ export function createRankingView({ onSelect }) {
       const stats = renderRows();
       const withData = state.rows.filter((row) => row.net !== null && row.net !== undefined).length;
       const notes = [`共 ${state.rows.length} 条，其中 ${withData} 条含资金流数据`];
-      if (stats.staleMain > 0) notes.push(`主力净额 ${stats.staleMain} 条停更（*）`);
-      if (stats.staleActive > 0) notes.push(`主动净买 ${stats.staleActive} 条停更（*）`);
+      // 「80 条全部停更」和「零星几条停更」是两件不同的事：
+      // 前者是整条源不可用（东财被拒时主力净额全体冻结），后者是单只标的没跟上。
+      // 统一写成「N 条停更」会让前者看起来像一堆脏数据，改为如实说「整体停更」。
+      const staleNote = (name, count, total) => {
+        if (!count) return null;
+        return count >= total ? `${name}整体停更（*）` : `${name} ${count} 条停更（*）`;
+      };
+      const total = state.rows.length;
+      const mainNote = staleNote('主力净额', stats.staleMain, total);
+      const activeNote = staleNote('主动净买', stats.staleActive, total);
+      if (mainNote) notes.push(mainNote);
+      if (activeNote) notes.push(activeNote);
       countEl.textContent = notes.join(' · ');
     } catch (error) {
       tbody.innerHTML = `<tr><td colspan="10"><div class="empty">加载失败：${escapeHtml(error.message)}</div></td></tr>`;

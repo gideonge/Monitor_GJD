@@ -113,7 +113,8 @@ function normalizeQuote(row) {
     price: num(row.f2),
     pctChg: num(row.f3),
     turnover: num(row.f6) ?? 0,
-    mainNet: num(row.f62) ?? 0,
+    // 缺 f62 就是缺测（null），不能兜底成 0——那是「净流入 0」这个具体结论，不是「没拿到」
+    mainNet: num(row.f62),
     mainRatio: num(row.f184),
     superNet: num(row.f66) ?? 0,
     bigNet: num(row.f72) ?? 0,

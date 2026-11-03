@@ -225,15 +225,16 @@ function minuteRecordFailure(error) {
 }
 
 /**
- * 把腾讯逐笔快照折算成「与东财同构」的行情行。
+ * 把腾讯逐笔快照折算成行情行。
  *
  * 关键换算：`(外盘 − 内盘) × 100 × 现价`。
- * 外盘/内盘是当日累计的主动买/卖手数，因此这个差值天然就是**当日累计主动净买入额**，
- * 与东财 f62（当日累计主力净流入）在形态与量纲上一致，可以直接顶到 mainNet 字段上，
- * 下游全部指标（窗口净额、连续流入、量比…）不需要改。
+ * 外盘/内盘是当日累计的主动买/卖手数（两者相加恒等于成交量，已用 sh510050 实测校验），
+ * 因此这个差值天然是**当日累计主动净买入额**。
  *
- * 口径差异必须说清楚：东财的「主力」= 大单 + 超大单；这里的「主动净买」= 全部主动买 − 全部主动卖。
- * 后者包含中小单，数值通常比主力口径略大，方向一致。数据源标识会带出去，前端据此标注。
+ * 口径红线：这个值只能写进 `activeNet`，绝不能写进 `mainNet`。
+ * 东财的「主力净额」是按单笔金额分档后超大单+大单的净额，四档相加恒为 0；
+ * 主动净买是全部主动买−全部主动卖。两者实测方向一致率只有 49%，混写会让排行在
+ * 源切换时整体重排（2026-11-03 线上踩到：510050 在两轮之间从 −1.14 亿跳到 +68.96 亿）。
  */
 export function toMinuteQuoteRow(parsed, market) {
   if (!parsed || !/^\d{6}$/.test(parsed.code ?? '')) return null;
@@ -241,7 +242,7 @@ export function toMinuteQuoteRow(parsed, market) {
   if (!(price > 0)) return null;
 
   const hasFlow = Number.isFinite(parsed.outer) && Number.isFinite(parsed.inner);
-  const net = hasFlow ? (parsed.outer - parsed.inner) * 100 * price : null;
+  const activeNet = hasFlow ? (parsed.outer - parsed.inner) * 100 * price : null;
 
   return {
     code: parsed.code,
@@ -250,12 +251,15 @@ export function toMinuteQuoteRow(parsed, market) {
     price,
     pctChg: parsed.pctChg ?? 0,
     turnover: parsed.amount ?? 0,
-    mainNet: net,
+    // 主力净额本源的腾讯没有，留空；缺测就显示缺测，不用另一种口径充数
+    mainNet: null,
     mainRatio: null,
     superNet: null,
     bigNet: null,
     midNet: null,
     smallNet: null,
+    // 主动净买：腾讯独有，东财不提供
+    activeNet,
     quoteTs: parsed.ts ?? null,
     outer: parsed.outer,
     inner: parsed.inner,

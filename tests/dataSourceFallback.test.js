@@ -63,13 +63,15 @@ test('新浪清单：非法 JSON 要抛出可识别的上游错误', () => {
   assert.throws(() => parseSinaList('<html>502 Bad Gateway</html>'), /不是合法 JSON/);
 });
 
-test('腾讯折算：主动净买额 =（外盘 − 内盘）× 100 × 现价', () => {
+test('腾讯折算：主动净买额 =（外盘 − 内盘）× 100 × 现价，且绝不写进 mainNet', () => {
   // 外盘 120000 手、内盘 100000 手、现价 4 元 → 净买 20000 手 = 200 万份 × 4 = 800 万元
   const row = toMinuteQuoteRow(
     { code: '510300', price: 4, pctChg: 1.2, amount: 5_000_000_000, outer: 120000, inner: 100000, ts: 1 },
     1,
   );
-  assert.equal(row.mainNet, 20_000 * 100 * 4);
+  assert.equal(row.activeNet, 20_000 * 100 * 4);
+  // 口径红线：腾讯只有主动净买，主力净额必须留空，交给东财那一轮填
+  assert.equal(row.mainNet, null);
   assert.equal(row.turnover, 5_000_000_000);
   assert.equal(row.quoteTs, 1);
   assert.equal(row.name, null); // 名称由上层用库内值补
@@ -77,11 +79,13 @@ test('腾讯折算：主动净买额 =（外盘 − 内盘）× 100 × 现价', 
 
 test('腾讯折算：主动卖出为负值，不能被截断', () => {
   const row = toMinuteQuoteRow({ code: '510300', price: 2, outer: 1000, inner: 3000, amount: 1 }, 1);
-  assert.equal(row.mainNet, -2000 * 100 * 2);
+  assert.equal(row.activeNet, -2000 * 100 * 2);
+  assert.equal(row.mainNet, null);
 });
 
 test('腾讯折算：缺外盘/内盘时净额给 null，不能当 0', () => {
   const row = toMinuteQuoteRow({ code: '510300', price: 4, amount: 100, outer: null, inner: null }, 1);
+  assert.equal(row.activeNet, null);
   assert.equal(row.mainNet, null);
 });
 

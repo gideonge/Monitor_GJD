@@ -1,8 +1,8 @@
 export function createFlowRepo(db) {
   const insertSnapshot = db.prepare(`
     INSERT OR IGNORE INTO flow_snapshot
-      (code, ts, trade_date, main_net, super_net, big_net, mid_net, small_net, main_ratio, price, pct_chg, turnover, source)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (code, ts, trade_date, main_net, active_net, super_net, big_net, mid_net, small_net, main_ratio, price, pct_chg, turnover, source)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
   const upsertDaily = db.prepare(`
@@ -28,7 +28,8 @@ export function createFlowRepo(db) {
           row.code,
           row.ts,
           row.tradeDate,
-          row.mainNet,
+          row.mainNet ?? null,
+          row.activeNet ?? null,
           row.superNet ?? 0,
           row.bigNet ?? 0,
           row.midNet ?? 0,
@@ -64,6 +65,29 @@ export function createFlowRepo(db) {
         .get(code) ?? null;
     },
 
+    /**
+     * 按「某一口径」取每只标的最近一次非空值。
+     *
+     * 不能直接用 latestForCodes：那取的是整行最新，而行里可能恰好缺这一列
+     * （东财那一轮没有 active_net，腾讯那一轮没有 main_net）。两个口径各自
+     * 找自己的最后已知值，才能做到「这一轮没更新就沿用上一时刻」，且互不顶替。
+     */
+    latestMetricForCodes(codes, column, fromTs = 0) {
+      if (codes.length === 0) return [];
+      if (column !== 'main_net' && column !== 'active_net') throw new Error(`不支持的字段：${column}`);
+      return db
+        .prepare(`
+          SELECT s.code, s.${column} AS value, s.ts, s.trade_date
+          FROM flow_snapshot s
+          JOIN (
+            SELECT code, MAX(ts) AS mts FROM flow_snapshot
+            WHERE ts >= ? AND ${column} IS NOT NULL AND code IN (${placeholders(codes.length)})
+            GROUP BY code
+          ) t ON s.code = t.code AND s.ts = t.mts
+        `)
+        .all(fromTs, ...codes);
+    },
+
     seriesInWindow(fromTs, codes = null) {
       if (codes && codes.length === 0) return [];
       const clause = codes ? `AND code IN (${placeholders(codes.length)})` : '';
@@ -75,7 +99,7 @@ export function createFlowRepo(db) {
 
     intradaySeries(code, tradeDate) {
       return db
-        .prepare('SELECT ts, main_net, super_net, big_net, mid_net, small_net, price, pct_chg, main_ratio FROM flow_snapshot WHERE code = ? AND trade_date = ? ORDER BY ts ASC')
+        .prepare('SELECT ts, main_net, active_net, super_net, big_net, mid_net, small_net, price, pct_chg, main_ratio FROM flow_snapshot WHERE code = ? AND trade_date = ? ORDER BY ts ASC')
         .all(code, tradeDate);
     },
 

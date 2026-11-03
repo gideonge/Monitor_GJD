@@ -1155,3 +1155,19 @@ table.data tbody td.wrap {
 .live-strip.is-recap .live-tag {
   color: var(--accent);
 }
+
+/* 双口径表格：该口径已停更的数值弱化显示，避免被误读成「当前值」。
+   选择器要写足 .data td.num 才压得住按涨跌着色用的 .num.in / .num.out */
+.data td.num.is-stale {
+  color: var(--muted);
+  font-style: italic;
+  opacity: 0.85;
+}
+
+.data td.num.is-stale .stale-mark {
+  color: var(--warn);
+  font-style: normal;
+  font-size: 10px;
+  vertical-align: super;
+  margin-left: 1px;
+}

@@ -53,9 +53,12 @@ export function createEtfController({ services }) {
       const limit = optionalInt(query.get('limit'), 'limit', { min: 1, max: 200 }) ?? 20;
       const category = optionalString(query.get('category'), 'category', { max: 20 });
       const onlyTracked = query.get('tracked') === '1' || query.get('tracked') === 'true';
+      // metric 决定按哪个口径排序：net（主序列）/ mainNet（主力净额）/ activeNet（主动净买）
+      const metric = requireEnum(query.get('metric') ?? 'net', 'metric', ['net', 'mainNet', 'activeNet']);
       sendJson(ctx.res, 200, {
         direction,
-        rows: queryService.ranking({ direction, limit, category, onlyTracked }),
+        metric,
+        rows: queryService.ranking({ direction, limit, category, onlyTracked, metric }),
         generatedAt: Date.now(),
       });
     },

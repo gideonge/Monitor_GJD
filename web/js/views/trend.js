@@ -296,7 +296,7 @@ export function createTrendView({ toast }) {
     if (block) block.hidden = flow.length < 2;
     if (flow.length >= 2) {
       drawAreaChart(containerFlow, {
-        points: flow.map((row) => ({ ts: row.ts, value: row.mainNet })),
+        points: flow.map((row) => ({ ts: row.ts, value: row.net ?? row.mainNet })),
         height: 180,
       });
       $('#chart-intraday-note').textContent = `${flow.length} 个采样点 · ${latest.tradeDate} 盘中轮询累积`;

@@ -2,9 +2,11 @@ import { notFound } from '../lib/errors.js';
 import { marketPhase, tradeDateOf } from '../lib/time.js';
 import { computeDailyMetrics } from './metricService.js';
 
-const SORTABLE = new Set(['mainNet', 'mainRatio', 'pctChg', 'turnover', 'superNet', 'code']);
+const SORTABLE = new Set(['mainNet', 'activeNet', 'net', 'mainRatio', 'pctChg', 'turnover', 'superNet', 'code']);
 
 function shapeQuote(live, meta) {
+  const mainNet = live?.mainNet ?? meta?.main_net ?? null;
+  const activeNet = live?.activeNet ?? meta?.active_net ?? null;
   return {
     code: meta?.code ?? live?.code,
     name: live?.name ?? meta?.name ?? '—',
@@ -13,8 +15,14 @@ function shapeQuote(live, meta) {
     price: live?.price ?? meta?.price ?? null,
     pctChg: live?.pctChg ?? meta?.pct_chg ?? null,
     turnover: live?.turnover ?? meta?.turnover ?? 0,
-    mainNet: live?.mainNet ?? meta?.main_net ?? null,
+    // 两个口径各存各的，绝不互相顶替：主力净额只认东财，主动净买只认腾讯
+    mainNet,
     mainRatio: live?.mainRatio ?? meta?.main_ratio ?? null,
+    mainTs: live?.mainTs ?? meta?.main_ts ?? null,
+    activeNet,
+    activeTs: live?.activeTs ?? meta?.active_ts ?? null,
+    /** 当日主序列口径：派生指标与总览都用它，保证源切换不产生假跳变 */
+    net: activeNet ?? mainNet ?? null,
     superNet: live?.superNet ?? meta?.super_net ?? null,
     bigNet: live?.bigNet ?? null,
     midNet: live?.midNet ?? null,
@@ -30,7 +38,13 @@ export function createQueryService({ repos, marketService, intradayService, volu
   function allRows() {
     const quotes = marketService.getQuotes();
     const metas = etfRepo.listVisible({ limit: 3000 });
-    return metas.map((meta) => shapeQuote(quotes.get(meta.code) ?? null, meta));
+    return metas.map((meta) => {
+      const row = shapeQuote(quotes.get(meta.code) ?? null, meta);
+      // 主口径跟随「当前在实时更新的源」：东财可用用主力净额，降级用主动净买。
+      // 缺了就回落到另一列，但绝不把两者相加或互相顶替。
+      if (marketService.primaryNet) row.net = marketService.primaryNet(row) ?? row.net;
+      return row;
+    });
   }
 
   function sortRows(rows, sort, dir) {
@@ -59,11 +73,13 @@ export function createQueryService({ repos, marketService, intradayService, volu
     return sortRows(rows, sort, dir).slice(0, limit);
   }
 
-  function ranking({ direction = 'inflow', limit = 20, category, onlyTracked = false } = {}) {
-    let rows = allRows().filter((row) => row.mainNet !== null);
+  function ranking({ direction = 'inflow', limit = 20, category, onlyTracked = false, metric = 'net' } = {}) {
+    const key = SORTABLE.has(metric) ? metric : 'net';
+    // 缺测的不参与该口径的排序（但不会因为缺测就从列表里消失，另一个口径还在）
+    let rows = allRows().filter((row) => row[key] !== null && row[key] !== undefined);
     if (onlyTracked) rows = rows.filter((row) => row.tracked);
     if (category) rows = rows.filter((row) => row.category === category);
-    rows.sort((a, b) => (direction === 'inflow' ? b.mainNet - a.mainNet : a.mainNet - b.mainNet));
+    rows.sort((a, b) => (direction === 'inflow' ? b[key] - a[key] : a[key] - b[key]));
     return rows.slice(0, limit);
   }
 
@@ -72,7 +88,7 @@ export function createQueryService({ repos, marketService, intradayService, volu
     for (const row of allRows()) {
       const key = row.category ?? '其他';
       const bucket = buckets.get(key) ?? { category: key, mainNet: 0, count: 0, inflow: 0, outflow: 0, turnover: 0 };
-      const net = row.mainNet ?? 0;
+      const net = row.net ?? 0;
       bucket.mainNet += net;
       bucket.count += 1;
       bucket.turnover += row.turnover ?? 0;
@@ -86,25 +102,27 @@ export function createQueryService({ repos, marketService, intradayService, volu
   function overview() {
     const rows = allRows();
     // 只统计真正拿到资金流数值的标的，避免把「无数据」当作 0 计入合计
-    const scoped = rows.filter((row) => typeof row.mainNet === 'number');
+    const scoped = rows.filter((row) => typeof row.net === 'number');
     const tracked = scoped.filter((row) => row.tracked);
     const sum = (list, key) => list.reduce((total, row) => total + (row[key] ?? 0), 0);
     const count = (list, predicate) => list.filter(predicate).length;
 
     return {
       market: {
-        totalMainNet: sum(scoped, 'mainNet'),
+        totalMainNet: sum(scoped, 'net'),
         totalTurnover: sum(scoped, 'turnover'),
-        inflow: count(scoped, (row) => (row.mainNet ?? 0) > 0),
-        outflow: count(scoped, (row) => (row.mainNet ?? 0) < 0),
+        inflow: count(scoped, (row) => (row.net ?? 0) > 0),
+        outflow: count(scoped, (row) => (row.net ?? 0) < 0),
         sampleSize: scoped.length,
         universeSize: rows.length,
       },
       tracked: {
-        totalMainNet: sum(tracked, 'mainNet'),
+        // 与 market 同一口径：row.net 已由 allRows() 按当前生效源抹平，
+        // 这里若继续用 mainNet，会出现「标题写主动净买、监控池却算主力净额」。
+        totalMainNet: sum(tracked, 'net'),
         totalTurnover: sum(tracked, 'turnover'),
-        inflow: count(tracked, (row) => (row.mainNet ?? 0) > 0),
-        outflow: count(tracked, (row) => (row.mainNet ?? 0) < 0),
+        inflow: count(tracked, (row) => (row.net ?? 0) > 0),
+        outflow: count(tracked, (row) => (row.net ?? 0) < 0),
         sampleSize: tracked.length,
       },
       topInflow: ranking({ direction: 'inflow', limit: 6 }),
@@ -172,10 +190,14 @@ export function createQueryService({ repos, marketService, intradayService, volu
       fast: fastTickService?.describe(code) ?? null,
       /** 分时行情（价格 + 成交量）：点开 ETF 即回看最后交易日整日走势 */
       intraday: { ...intraday, surge },
-      /** 盘中轮询累积的主力净流入分时（仅当天平台运行过才有值） */
+      /** 盘中轮询累积的净流入分时（仅当天平台运行过才有值） */
       intradayFlow: flowPoints.map((row) => ({
         ts: row.ts,
+        // net 是主序列口径（主动净买优先），绘图与累计曲线一律用它；
+        // mainNet 保留东财原始主力净额，两列并存时各自取用
+        net: row.active_net ?? row.main_net,
         mainNet: row.main_net,
+        activeNet: row.active_net,
         superNet: row.super_net,
         price: row.price,
         pctChg: row.pct_chg,

@@ -32,7 +32,7 @@
           <div class="kpi-sub" id="kpi-market-sub">—</div>
         </div>
         <div class="kpi accent">
-          <div class="kpi-label">监控池主力净流入</div>
+          <div class="kpi-label" id="kpi-tracked-label">监控池主力净流入</div>
           <div class="kpi-value" id="kpi-tracked-net">—</div>
           <div class="kpi-sub" id="kpi-tracked-sub">—</div>
         </div>
@@ -77,6 +77,7 @@
               </div>
               <div class="field">
                 <select id="rank-sort">
+                  <option value="activeNet">按主动净买</option>
                   <option value="mainNet">按主力净额</option>
                   <option value="mainRatio">按净占比</option>
                   <option value="superNet">按超大单</option>
@@ -99,6 +100,7 @@
                     <th>名称</th>
                     <th>分类</th>
                     <th class="num">主力净额</th>
+                    <th class="num">主动净买</th>
                     <th class="num">净占比</th>
                     <th class="num">超大单</th>
                     <th class="num">成交额</th>

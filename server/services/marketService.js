@@ -8,6 +8,7 @@ import { mapPool, chunk } from '../lib/concurrency.js';
 import { withTransaction } from '../db/index.js';
 import { evaluateRules, persistAlerts } from './alertService.js';
 import { EVENTS } from './events.js';
+import { mergeQuoteFields, overlayUniverseRow } from '../lib/quoteMerge.js';
 
 /**
  * 数据采集与状态中枢：
@@ -38,16 +39,57 @@ export function createMarketService({ db, repos, events, logger }) {
 
   const log = logger.child({ module: 'market' });
 
+  /**
+   * 合并一条快照到内存：缺测字段一律保留上一时刻的值。
+   *
+   * 具体规则见 lib/quoteMerge.js：null 不覆盖、成交额 0 不覆盖、
+   * 两个口径各自带时间戳（mainTs / activeTs）。
+   */
+  function mergeQuote(incoming) {
+    if (!incoming?.code) return null;
+    const previous = state.quotes.get(incoming.code) ?? null;
+    const next = mergeQuoteFields(previous, incoming);
+    state.quotes.set(incoming.code, next);
+    return next;
+  }
+
+  /**
+   * 当日「主序列」口径：主动净买入优先，缺了才回落到主力净额。
+   *
+   * 派生指标（窗口净额、总览合计、盘中累计曲线）必须锁定一个口径，否则源一换、
+   * 序列就出现几十亿的假跳变。腾讯源连续可用、字段自洽（外盘+内盘=成交量），
+   * 因此以它为主；东财的主力净额只用于展示与筛选。
+   */
+  const effectiveNet = (row) => (row?.activeNet ?? row?.mainNet ?? null);
+
+  /**
+   * 当前在实时更新的那个口径。合计、KPI、默认排序都跟它走：
+   * 东财活着就按主力净额，降级到腾讯就按主动净买。
+   * 固定写死任何一个，都会在源切换当天把另一个源的历史值当成实时值加总。
+   */
+  const primaryMetric = () => (state.quoteSource === 'eastmoney' ? 'mainNet' : 'activeNet');
+
+  const primaryNet = (row) => {
+    const primary = primaryMetric();
+    const value = row?.[primary];
+    if (value !== null && value !== undefined) return value;
+    return effectiveNet(row);
+  };
+
   function computeAggregate(rows) {
     let totalMainNet = 0;
     let inflow = 0;
     let outflow = 0;
     let turnover = 0;
     for (const row of rows) {
-      totalMainNet += row.mainNet ?? 0;
+      // 合计口径与派生指标一致：用主动净买这条连续序列，避免半个市场有主力数据、
+      // 半个市场没有时加总出毫无意义的数
+      const net = primaryNet(row);
+      totalMainNet += net ?? 0;
       turnover += row.turnover ?? 0;
-      if ((row.mainNet ?? 0) > 0) inflow += 1;
-      else if ((row.mainNet ?? 0) < 0) outflow += 1;
+      if (net === null) continue;
+      if (net > 0) inflow += 1;
+      else if (net < 0) outflow += 1;
     }
     return { totalMainNet, inflow, outflow, flat: rows.length - inflow - outflow, turnover, sampleSize: rows.length, at: Date.now() };
   }
@@ -56,7 +98,11 @@ export function createMarketService({ db, repos, events, logger }) {
   function hydrate() {
     const tracked = etfRepo.listTracked();
     if (tracked.length > 0) {
-      const cached = flowRepo.latestForCodes(tracked.map((row) => row.code), 0);
+      const codes = tracked.map((row) => row.code);
+      const cached = flowRepo.latestForCodes(codes, 0);
+      // 两个口径分别找各自的最后已知值：整行最新那条未必带齐两列
+      const latestMain = new Map(flowRepo.latestMetricForCodes(codes, 'main_net', 0).map((row) => [row.code, row]));
+      const latestActive = new Map(flowRepo.latestMetricForCodes(codes, 'active_net', 0).map((row) => [row.code, row]));
       if (cached.length > 0) {
         withTransaction(db, () =>
           etfRepo.updateQuotes(
@@ -65,9 +111,10 @@ export function createMarketService({ db, repos, events, logger }) {
               price: row.price,
               pctChg: row.pct_chg,
               turnover: row.turnover,
-              mainNet: row.main_net,
-              mainRatio: row.main_ratio,
-              superNet: row.super_net,
+              mainNet: latestMain.get(row.code)?.value ?? null,
+              mainTs: latestMain.get(row.code)?.ts ?? null,
+              activeNet: latestActive.get(row.code)?.value ?? null,
+              activeTs: latestActive.get(row.code)?.ts ?? null,
               quoteTs: row.ts,
             })),
           ),
@@ -78,7 +125,9 @@ export function createMarketService({ db, repos, events, logger }) {
     const metas = etfRepo.listVisible({ limit: 3000 });
     let count = 0;
     for (const meta of metas) {
-      if (meta.main_net === null || meta.main_net === undefined) continue;
+      const hasMain = meta.main_net !== null && meta.main_net !== undefined;
+      const hasActive = meta.active_net !== null && meta.active_net !== undefined;
+      if (!hasMain && !hasActive) continue;
       state.quotes.set(meta.code, {
         code: meta.code,
         market: meta.market,
@@ -86,12 +135,15 @@ export function createMarketService({ db, repos, events, logger }) {
         price: meta.price,
         pctChg: meta.pct_chg,
         turnover: meta.turnover ?? 0,
-        mainNet: meta.main_net,
-        mainRatio: meta.main_ratio,
-        superNet: meta.super_net ?? 0,
+        mainNet: hasMain ? meta.main_net : null,
+        mainRatio: hasMain ? meta.main_ratio : null,
+        superNet: hasMain ? meta.super_net ?? 0 : null,
+        activeNet: hasActive ? meta.active_net : null,
         bigNet: null,
         midNet: null,
         smallNet: null,
+        mainTs: meta.main_ts ?? null,
+        activeTs: meta.active_ts ?? null,
         quoteTs: meta.quote_ts,
       });
       count += 1;
@@ -144,11 +196,19 @@ export function createMarketService({ db, repos, events, logger }) {
       const trackedCodes = [...new Set([...pinned, ...topCodes])].slice(0, Math.max(config.universeSize, pinned.length));
       etfRepo.setTracked(trackedCodes);
 
-      state.quotes = new Map(rows.map((row) => [row.code, row]));
+      // 清单刷新只负责「有哪些标的、叫什么、属于哪类」。
+      // 这里必须合并而不是整体替换：清单源（新浪）不提供任何净额字段，
+      // 直接 new Map(rows) 会把这一轮之前抓到的净额全部抹掉，
+      // 每 10 分钟制造一次「全市场资金流短暂空白」。
+      const merged = new Map(state.quotes);
+      for (const row of rows) {
+        merged.set(row.code, overlayUniverseRow(merged.get(row.code) ?? null, row));
+      }
+      state.quotes = merged;
       state.universeRows = rows;
       state.universeTotal = rows.length;
       state.trackedCount = trackedCodes.length;
-      state.aggregate = computeAggregate(rows);
+      state.aggregate = computeAggregate([...merged.values()]);
       state.lastUniverseAt = now;
       state.universeSource = source;
 
@@ -261,7 +321,7 @@ export function createMarketService({ db, repos, events, logger }) {
         etfRepo.updateQuotes(quotes, now);
         return count;
       });
-      for (const quote of quotes) state.quotes.set(quote.code, quote);
+      for (const quote of quotes) mergeQuote(quote);
 
       state.lastTickAt = now;
       state.quoteSource = quoteSource;
@@ -446,28 +506,23 @@ export function createMarketService({ db, repos, events, logger }) {
    */
   function describeSource() {
     const { universeSource, quoteSource } = state;
-    const degraded = universeSource !== 'eastmoney' || quoteSource !== 'eastmoney';
-    if (!degraded) {
-      return {
-        name: '东方财富',
-        provider: 'eastmoney',
-        mode: 'live',
-        universeSource,
-        quoteSource,
-        fields: ['主力净流入', '超大单', '大单', '中单', '小单', '成交额'],
-        note: null,
-      };
-    }
+    const direct = quoteSource === 'eastmoney';
     const parts = [SOURCE_LABEL[universeSource] ?? universeSource];
     if (quoteSource !== universeSource) parts.push(SOURCE_LABEL[quoteSource] ?? quoteSource);
     return {
-      name: `${parts.join(' / ')} · 主动净买额口径`,
+      // 两个口径是并存的：东财给主力净额，腾讯给主动净买。谁在实时更新，
+      // 排行就默认按谁排序；另一列照样显示，但会标注停更多久。
+      name: direct ? '东方财富 · 主力净额口径' : `${parts.join(' / ')} · 主动净买口径`,
       provider: quoteSource,
-      mode: 'degraded',
+      mode: direct ? 'live' : 'degraded',
       universeSource,
       quoteSource,
-      fields: quoteSource === 'eastmoney' ? ['主力净流入', '成交额'] : ['主动净买额', '成交额'],
-      note: '主力净流入不可用（东财实时行情拒绝当前出口 IP），净额字段改为（外盘−内盘）×100×现价的当日累计值',
+      fields: direct ? ['主力净额', '超大单', '成交额'] : ['主动净买额', '成交额'],
+      /** 排行默认排序口径：跟随当前在实时更新的那个源 */
+      defaultMetric: direct ? 'mainNet' : 'activeNet',
+      note: direct
+        ? null
+        : '主力净额需要东财实时行情（当前出口 IP 被拒），该列显示最近一次成功取到的值；主动净买额由腾讯（外盘−内盘）×100×现价折算，连续可用。两者口径不同（实测方向一致率约 49%），不可互相顶替。',
     };
   }
 
@@ -510,5 +565,10 @@ export function createMarketService({ db, repos, events, logger }) {
     getQuotes: () => state.quotes,
     getAggregate: () => state.aggregate ?? { totalMainNet: 0, inflow: 0, outflow: 0, flat: 0, turnover: 0, sampleSize: 0 },
     getUniverseRows: () => state.universeRows,
+    /** 当日主序列口径：主动净买优先，缺了回落主力净额。派生指标统一走这里 */
+    effectiveNet,
+    /** 当前实时口径（mainNet / activeNet），前端默认排序与合计都跟它走 */
+    primaryMetric,
+    primaryNet,
   };
 }

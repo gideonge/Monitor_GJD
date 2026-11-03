@@ -78,12 +78,20 @@ $$('.tab').forEach((tab) => {
 function renderKpis(data) {
   const { market, tracked, alerts: alertStats, coverage } = data;
 
+  // 合计口径跟随当前实时源：东财可用时是主力净额，降级到腾讯时是主动净买。
+  // 标签必须跟着变，否则会出现「写着主力净流入、算的却是主动净买」。
+  // 注意：renderKpis 在 updateStatus 之前调用，这里必须自己从 status 取，
+  // 不能依赖 updateStatus 的副作用。
+  const netLabel = data.status?.dataSource?.defaultMetric === 'activeNet' ? '主动净买' : '主力净流入';
   const label = $('#kpi-market-label');
   if (label) {
     const sampled = market.sampleSize ?? 0;
     const universe = market.universeSize ?? 0;
-    label.textContent = universe > 0 && sampled < universe ? `全市场主力净流入（采样 ${sampled} 只）` : '全市场主力净流入';
+    label.textContent =
+      universe > 0 && sampled < universe ? `全市场${netLabel}（采样 ${sampled} 只）` : `全市场${netLabel}`;
   }
+  const trackedLabel = $('#kpi-tracked-label');
+  if (trackedLabel) trackedLabel.textContent = `监控池${netLabel}`;
 
   $('#kpi-market-net').innerHTML = `<span class="${signClass(market.totalMainNet)}">${fmtAmount(market.totalMainNet)}</span>`;
   $('#kpi-market-sub').innerHTML = `流入 <b>${fmtInt(market.inflow)}</b> 家 · 流出 <b>${fmtInt(
@@ -211,6 +219,10 @@ function updateStatus(status) {
   }
   sourceChip.title = source?.note ?? '数据来源';
   sourceChip.classList.toggle('is-warn', Boolean(stale) || degraded);
+
+  // 排行默认按「当前在实时更新的口径」排：东财可用时按主力净额，
+  // 降级到腾讯时按主动净买。避免用一个已经停更的列当排名依据。
+  ranking.applyDefaultMetric(source?.defaultMetric);
 }
 
 // ---------------- 实时告警流 ----------------

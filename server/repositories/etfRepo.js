@@ -8,18 +8,31 @@ export function createEtfRepo(db) {
       name = excluded.name,
       market = excluded.market,
       category = excluded.category,
-      price = excluded.price,
-      pct_chg = excluded.pct_chg,
-      turnover = excluded.turnover,
-      main_net = excluded.main_net,
-      main_ratio = excluded.main_ratio,
-      super_net = excluded.super_net,
-      quote_ts = excluded.quote_ts,
+      price = COALESCE(excluded.price, etf.price),
+      pct_chg = COALESCE(excluded.pct_chg, etf.pct_chg),
+      turnover = COALESCE(excluded.turnover, etf.turnover),
+      main_net = COALESCE(excluded.main_net, etf.main_net),
+      main_ratio = COALESCE(excluded.main_ratio, etf.main_ratio),
+      super_net = COALESCE(excluded.super_net, etf.super_net),
+      quote_ts = COALESCE(excluded.quote_ts, etf.quote_ts),
       updated_at = excluded.updated_at
   `);
 
+  // 每一列都 COALESCE：清单刷新、降级源、单条缺字段都不许把已有值冲成 NULL。
+  // 「这一轮没更新」应当是「沿用上一时刻」，不是「变成空白」。
   const updateQuote = db.prepare(`
-    UPDATE etf SET price = ?, pct_chg = ?, turnover = ?, main_net = ?, main_ratio = ?, super_net = ?, quote_ts = ?, updated_at = ?
+    UPDATE etf SET
+      price      = COALESCE(?, price),
+      pct_chg    = COALESCE(?, pct_chg),
+      turnover   = COALESCE(?, turnover),
+      main_net   = COALESCE(?, main_net),
+      main_ratio = COALESCE(?, main_ratio),
+      super_net  = COALESCE(?, super_net),
+      main_ts    = COALESCE(?, main_ts),
+      active_net = COALESCE(?, active_net),
+      active_ts  = COALESCE(?, active_ts),
+      quote_ts   = COALESCE(?, quote_ts),
+      updated_at = ?
     WHERE code = ?
   `);
 
@@ -53,13 +66,17 @@ export function createEtfRepo(db) {
     /** 更新"最近已知快照"缓存，保证重启或上游不可用时仍有数据可展示 */
     updateQuotes(rows, now = Date.now()) {
       for (const row of rows) {
+        const turnover = Number(row.turnover);
         updateQuote.run(
           row.price ?? null,
           row.pctChg ?? null,
-          row.turnover ?? 0,
+          Number.isFinite(turnover) && turnover > 0 ? turnover : null,
           row.mainNet ?? null,
           row.mainRatio ?? null,
           row.superNet ?? null,
+          row.mainNet === null || row.mainNet === undefined ? null : row.mainTs ?? row.quoteTs ?? now,
+          row.activeNet ?? null,
+          row.activeNet === null || row.activeNet === undefined ? null : row.activeTs ?? row.quoteTs ?? now,
           row.quoteTs ?? null,
           now,
           row.code,

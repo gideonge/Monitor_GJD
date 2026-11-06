@@ -49,6 +49,10 @@ export function createTrendView({ toast }) {
     setStat('i-open', priceText(summary.open));
     setStat('i-high', priceText(summary.high));
     setStat('i-low', priceText(summary.low));
+    // 盘中最后一根分钟还没定型，叫「收盘」容易被当成定稿价，改成「最新」；
+    // 收盘后（或看历史交易日）才还原成「收盘」。
+    const closeLabel = document.getElementById('i-close-label');
+    if (closeLabel) closeLabel.textContent = intraday?.isClosed ? '收盘' : '最新';
     setStat('i-close', priceText(summary.close), signClass(summary.close - (intraday.preClose ?? summary.close)));
     setStat('i-pct', fmtSignedPct(summary.pctChg), signClass(summary.pctChg));
     setStat('i-amplitude', summary.amplitude === null ? '—' : fmtPct(summary.amplitude));
@@ -429,11 +433,15 @@ export function createTrendView({ toast }) {
     refreshIfMatches(code) {
       if (latest && code === currentCode) void load(code);
     },
-    /** 盘中由实时推送触发：仅当当前标的当天分时未收盘时刷新，120 秒节流 */
+    /**
+     * 盘中由实时推送触发：仅当当前标的当天分时未收盘时刷新。
+     * 节流 60 秒 —— 与服务端「同一标的一分钟内只允许一次上游请求」对齐；
+     * 原来写 120 秒，等于在服务端已经把数据拉新的前提下又白等了一分钟。
+     */
     refreshIntradayIfLive() {
       if (!currentCode || !intraday || intraday.isClosed) return;
       const now = Date.now();
-      if (now - lastIntradayRefreshAt < 120_000) return;
+      if (now - lastIntradayRefreshAt < 60_000) return;
       lastIntradayRefreshAt = now;
       void loadIntraday(currentCode, null);
     },

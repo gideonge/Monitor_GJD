@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { normalizeSinaRow, parseSinaList } from '../server/providers/sina.js';
+import { normalizeSinaRow, parseSinaList, parseSinaMinuteKline } from '../server/providers/sina.js';
 import { toMinuteQuoteRow } from '../server/providers/tencent.js';
 
 /**
@@ -93,4 +93,46 @@ test('腾讯折算：无效价格返回 null，避免把停牌快照写进库', 
   assert.equal(toMinuteQuoteRow({ code: '510300', price: 0, outer: 1, inner: 1 }, 1), null);
   assert.equal(toMinuteQuoteRow({ code: '51030', price: 4 }, 1), null);
   assert.equal(toMinuteQuoteRow(null, 1), null);
+});
+
+// ---------------- 新浪分钟 K 线：分时的第三个源 ----------------
+
+test('新浪分钟线：成交量从「股」换成「手」，均价按当日累计还原', () => {
+  const text = JSON.stringify([
+    { day: '2026-11-06 09:31:00', open: '2.500', high: '2.505', low: '2.495', close: '2.500', volume: '1000000', amount: '2500000' },
+    { day: '2026-11-06 09:32:00', open: '2.500', high: '2.510', low: '2.498', close: '2.505', volume: '2000000', amount: '5010000' },
+  ]);
+  const rows = parseSinaMinuteKline(text);
+  assert.equal(rows.length, 2);
+  assert.equal(rows[0].volume, 10000); // 100 万股 → 1 万手
+  assert.equal(rows[1].volume, 20000);
+  assert.equal(rows[0].amount, 2500000);
+  assert.equal(rows[0].avgPrice, 2.5); // 250万 / 100万股
+  // 第二根要用两天累计的额除以累计的量，不是单根的额/量
+  assert.equal(rows[1].avgPrice, (2500000 + 5010000) / (1000000 + 2000000));
+  assert.equal(rows[1].high, 2.51);
+  assert.equal(rows[1].minute, '09:32');
+  assert.equal(rows[1].tradeDate, '2026-11-06');
+  assert.equal(rows[1].source, 'sina');
+});
+
+test('新浪分钟线：午休、盘后与非法行一律剔除', () => {
+  const text = JSON.stringify([
+    { day: '2026-11-06 09:25:00', close: '2.49', volume: '100', amount: '24900' },
+    { day: '2026-11-06 11:30:00', close: '2.49', volume: '100', amount: '24900' },
+    { day: '2026-11-06 12:15:00', close: '2.49', volume: '100', amount: '24900' },
+    { day: '2026-11-06 15:00:00', close: '2.49', volume: '100', amount: '24900' },
+    { day: '2026-11-06 15:30:00', close: '2.49', volume: '100', amount: '24900' },
+    { day: 'bad-stamp', close: '2.49' },
+    { day: '2026-11-06 13:05:00', close: '0' },
+  ]);
+  const minutes = parseSinaMinuteKline(text).map((row) => row.minute);
+  assert.deepEqual(minutes, ['11:30', '15:00']);
+});
+
+test('新浪分钟线：空响应返回空数组，不是合法 JSON 时报错', () => {
+  assert.deepEqual(parseSinaMinuteKline('null'), []);
+  assert.deepEqual(parseSinaMinuteKline(''), []);
+  assert.deepEqual(parseSinaMinuteKline('[]'), []);
+  assert.throws(() => parseSinaMinuteKline('<html>waf</html>'), /不是合法 JSON/);
 });

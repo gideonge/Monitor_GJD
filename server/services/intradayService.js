@@ -238,11 +238,15 @@ export function createIntradayService({ db, repos, logger }) {
   async function getIntraday(code, { date, force = false, market } = {}) {
     const local = readIntraday(code, { date });
     const target = date && /^\d{4}-\d{2}-\d{2}$/.test(date) ? date : local.tradeDate;
+    // 当日盘中永远算「没取完」。
+    // 原先是 `bars.length < FULL_DAY_POINTS`（200 点），但一个完整交易日是 241 点，
+    // 盘中到 14:20 前后就凑够 200 点，之后 detail 页再也不刷新 —— 用户看到的
+    // 「表不动了」正是这个门槛造成的。限流交给下面 60 秒的节流窗口，不要用点数当闸门。
     const needed =
       force ||
       !local.available ||
       (target && !local.dates.includes(target)) ||
-      (target === tradeDateOf() && !local.isClosed && local.bars.length < FULL_DAY_POINTS);
+      (target === tradeDateOf() && !local.isClosed);
 
     if (!needed) return local;
 

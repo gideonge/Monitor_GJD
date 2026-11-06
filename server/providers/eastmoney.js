@@ -3,6 +3,7 @@ import { upstream } from '../lib/errors.js';
 import { sleep } from '../lib/concurrency.js';
 import { beijingTs } from '../lib/time.js';
 import { getText } from '../lib/httpClient.js';
+import { fetchMinuteKlineFromSina, isSinaMinuteBreakerOpen } from './sina.js';
 
 const UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36';
@@ -360,29 +361,43 @@ async function fetchIntradayFromTencent(code, market) {
 }
 
 /**
- * 备源（腾讯分钟接口）的独立入口：盘中实时刷新走这里，不再先试主源。
+ * 盘中实时刷新的分时入口：腾讯 → 新浪。
  *
- * 主源在东财限流期每次都要先等一次失败，40 只标的的轮转会被拖成分钟级；
- * 腾讯接口对分钟级轮询的容忍度明显更高，实时刷新直接走备源更稳。
- * 单独用一个 'tencent' 熔断档，避免污染 quote / history 的状态。
+ * 只回「最后交易日」的行：刷新是增量落库，把 4 个交易日的点全写一遍
+ * 既浪费事务，也会让上层拿 prepared[0].tradeDate 当成当天日期算错。
  */
 export async function fetchMinuteToday(code, market) {
-  if (isBreakerOpen('tencent')) {
-    throw upstream('分时备源暂时不可用（熔断中），请稍后重试', { reason: 'circuit_open', scope: 'tencent' });
+  if (!isBreakerOpen('tencent')) {
+    try {
+      const result = await fetchIntradayFromTencent(code, market);
+      recordSuccess('tencent');
+      return result;
+    } catch (error) {
+      recordFailure('tencent');
+      // 腾讯被 WAF 拦时不要在这里抛出：下面还有新浪可以顶
+      if (isSinaMinuteBreakerOpen()) throw error;
+    }
   }
-  try {
-    const result = await fetchIntradayFromTencent(code, market);
-    recordSuccess('tencent');
-    return result;
-  } catch (error) {
-    recordFailure('tencent');
-    throw error;
-  }
+
+  const sina = await fetchMinuteKlineFromSina(code, market);
+  const dates = [...new Set(sina.rows.map((row) => row.tradeDate))].sort();
+  const latest = dates[dates.length - 1] ?? null;
+  const rows = latest ? sina.rows.filter((row) => row.tradeDate === latest) : [];
+  // 昨收取自序列里更早那个交易日的最后一根；只有一天数据时交给上层按开盘价兜底
+  const previous = latest ? sina.rows.filter((row) => row.tradeDate < latest) : [];
+  const preClose = previous.length > 0 ? previous[previous.length - 1].close : null;
+  return { ...sina, rows, preClose, degraded: '腾讯不可用，已切新浪' };
 }
 
 /**
- * 分时行情统一入口：主源失败或被熔断时自动切备源。
- * 这样即使行情主源被限流，用户点开详情仍能看到最后交易日的分时与量能。
+ * 分时行情统一入口：主源失败或被熔断时按「新浪 → 腾讯」顺序降级。
+ *
+ * 三个源的实际表现（2026-11-06 线上实测）：
+ *   东财 trends2  —— 最准（带真实日高日低与 09:30 集合竞价点），但对机房 IP 时通时断；
+ *   腾讯 minute   —— 已被腾讯 WAF 拦成 501 拦截页（`waf.tencent.com/501page.html`），
+ *                    属于行为风控，不是参数错误，重试无用，只能等它自己解除；
+ *   新浪分钟 K    —— 同时段稳定 200，且一次带回 4 个交易日，字段比腾讯全（有真实高低价）。
+ * 所以把新浪放在腾讯之前：两者都能覆盖「当日 + 昨收」的需求，但新浪现在真的能用。
  */
 export async function fetchIntradayTrends(code, market, { days = 5 } = {}) {
   const problems = [];
@@ -399,12 +414,24 @@ export async function fetchIntradayTrends(code, market, { days = 5 } = {}) {
     problems.push('主源熔断中');
   }
 
+  if (!isSinaMinuteBreakerOpen()) {
+    try {
+      const sina = await fetchMinuteKlineFromSina(code, market);
+      if (sina.rows.length > 0) return { ...sina, degraded: problems.join('；') };
+      problems.push('新浪返回空');
+    } catch (error) {
+      problems.push(`新浪 ${error.message}`);
+    }
+  } else {
+    problems.push('新浪熔断中');
+  }
+
   try {
     const fallback = await fetchIntradayFromTencent(code, market);
     if (fallback.rows.length > 0) return { ...fallback, degraded: problems.join('；') };
-    problems.push('备源返回空');
+    problems.push('腾讯返回空');
   } catch (error) {
-    problems.push(`备源 ${error.message}`);
+    problems.push(`腾讯 ${error.message}`);
   }
 
   throw upstream(`分时数据获取失败：${problems.join(' / ')}`, { reason: 'network', source: 'all' });

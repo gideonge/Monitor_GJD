@@ -355,8 +355,11 @@ export function createTrendView({ toast }) {
     fastData = fastFor === currentCode ? fastData : null;
     if (detail.fast?.inPool) void loadFast(currentCode);
 
-    // 首屏用本地缓存渲染；本地没有该交易日的分时，再按需向上游拉取一次
-    if (!intraday?.available && currentCode) void loadIntraday(currentCode, null);
+    // 首屏先用本地缓存渲染，避免白屏；然后按需向上游要一次最新的。
+    // 不能只判 `!available`：盘中标的分时早就有数据（available=true），
+    // 但可能停在几分钟前，用户点开看到的仍是旧值 —— 这正是「表不更新」的由来。
+    // 服务端有 60 秒节流兜底，这里直接请求不会打爆上游。
+    if (currentCode && (!intraday?.available || !intraday?.isClosed)) void loadIntraday(currentCode, null);
   }
 
   async function loadIntraday(code, date) {

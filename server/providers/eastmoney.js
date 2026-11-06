@@ -390,6 +390,17 @@ export async function fetchMinuteToday(code, market) {
 }
 
 /**
+ * 分时源是否全部不可用。
+ *
+ * 调度层用它决定「这一轮还要不要继续」，所以必须按「所有源都挂了」判断。
+ * 之前只看腾讯的熔断状态：腾讯被 WAF 拦死后熔断打开，轮转循环第一轮就 break，
+ * 于是新浪明明可用，每轮却只刷新到 3 只标的 —— 表现就是「有的标的新、有的不动」。
+ */
+export function isMinuteSourceExhausted() {
+  return isBreakerOpen('history') && isBreakerOpen('tencent') && isSinaMinuteBreakerOpen();
+}
+
+/**
  * 分时行情统一入口：主源失败或被熔断时按「新浪 → 腾讯」顺序降级。
  *
  * 三个源的实际表现（2026-11-06 线上实测）：

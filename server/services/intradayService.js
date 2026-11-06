@@ -1,5 +1,10 @@
 import { config } from '../config/index.js';
-import { fetchIntradayTrends, fetchMinuteToday, isBreakerOpen } from '../providers/eastmoney.js';
+import {
+  fetchIntradayTrends,
+  fetchMinuteToday,
+  isBreakerOpen,
+  isMinuteSourceExhausted,
+} from '../providers/eastmoney.js';
 import { isTradeDateClosed, marketPhase, tradeDateOf, PHASE_LABEL } from '../lib/time.js';
 import { sleep } from '../lib/concurrency.js';
 import { withTransaction } from '../db/index.js';
@@ -302,7 +307,9 @@ export function createIntradayService({ db, repos, logger }) {
     if (phase !== 'trading' && phase !== 'closing') return { ok: false, reason: 'not-trading', phase };
     if (state.busyLive) return { ok: false, reason: 'busy' };
     if (limit <= 0) return { ok: false, reason: 'disabled' };
-    if (isBreakerOpen('tencent')) return { ok: false, reason: 'circuit_open' };
+    // 按「所有分时源是否都不可用」判断，不能只看腾讯：腾讯被 WAF 拦死时
+    // 熔断会一直开着，但新浪还能顶，不能因此把整轮刷新掐掉。
+    if (isMinuteSourceExhausted()) return { ok: false, reason: 'circuit_open' };
 
     state.busyLive = true;
     const started = Date.now();
@@ -318,7 +325,7 @@ export function createIntradayService({ db, repos, logger }) {
       const ordered = [...pool.slice(start), ...pool.slice(0, start)].slice(0, Math.min(limit, pool.length));
 
       for (const etf of ordered) {
-        if (isBreakerOpen('tencent')) break;
+        if (isMinuteSourceExhausted()) break;
         try {
           const market = resolveMarket(etf.code, etf.market);
           const quote = await serialLive(() => fetchMinuteToday(etf.code, market));
@@ -384,7 +391,7 @@ export function createIntradayService({ db, repos, logger }) {
       const tracked = etfRepo.listTracked();
       // 主源熔断时改用备源（腾讯只提供最后交易日），否则分时回填会完全停摆 ——
       // 而分时是量能突变预警的唯一输入，停摆意味着整个预警功能失效。
-      if (isBreakerOpen('history') && isBreakerOpen('tencent')) {
+      if (isMinuteSourceExhausted()) {
         log.warn('分时主备源均不可用，跳过本轮回填', { tradeDate });
         return { ok: false, reason: 'circuit_open', tradeDate };
       }
@@ -396,7 +403,7 @@ export function createIntradayService({ db, repos, logger }) {
 
       for (const etf of tracked) {
         if (done >= limit || attempts >= limit * 2) break;
-        if (isBreakerOpen('history') && isBreakerOpen('tencent')) break;
+        if (isMinuteSourceExhausted()) break;
         const existing = intradayRepo.countOf(etf.code, tradeDate);
         if (!force && existing >= FULL_DAY_POINTS) {
           skipped += 1;
@@ -429,7 +436,7 @@ export function createIntradayService({ db, repos, logger }) {
         } catch (error) {
           failed += 1;
           state.lastError = { at: Date.now(), code: etf.code, message: error.message };
-          if (isBreakerOpen('history') && isBreakerOpen('tencent')) break;
+          if (isMinuteSourceExhausted()) break;
         }
       }
 

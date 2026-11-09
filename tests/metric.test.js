@@ -79,6 +79,23 @@ test('ETF 分类：关键词优先级符合预期', () => {
   assert.equal(classifyEtf('未知名称基金'), '其他');
 });
 
+test('ETF 分类：各类固收产品的名称没有统一词根，也要归到债券货币', () => {
+  // 这些名称里没有完整的「债券」二字，靠关键词表里的泛化「债」兜底，
+  // 否则会被后面的「科创」「国开」抢走，错误进入监控池
+  assert.equal(classifyEtf('科创债ETF嘉实'), '债券货币');
+  assert.equal(classifyEtf('公司债ETF南方'), '债券货币');
+  assert.equal(classifyEtf('城投债ETF海富通'), '债券货币');
+  assert.equal(classifyEtf('国开债ETF华安'), '债券货币');
+  assert.equal(classifyEtf('5年地方债ETF海富通'), '债券货币');
+  // 货币 ETF 同样没有统一词根，按产品名特征识别
+  assert.equal(classifyEtf('银华日利ETF'), '债券货币');
+  assert.equal(classifyEtf('华宝添益ETF'), '债券货币');
+  assert.equal(classifyEtf('易方达保证金ETF'), '债券货币');
+  // 反向：不能被「债」误伤
+  assert.equal(classifyEtf('金融ETF国泰'), '金融地产');
+  assert.equal(classifyEtf('科创50ETF华夏'), '宽基指数');
+});
+
 test('金额格式化覆盖 亿 / 万 / 元 与负值', () => {
   assert.equal(formatAmount(123_000_000), '+1.23亿');
   assert.equal(formatAmount(-4_560_000), '-456.0万');

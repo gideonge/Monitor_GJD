@@ -118,8 +118,42 @@ export function createEtfRepo(db) {
         .all(limit);
     },
 
-    topByTurnover(limit) {
-      return db.prepare('SELECT * FROM etf ORDER BY turnover DESC LIMIT ?').all(limit);
+    /**
+     * 按成交额取前 N 只候选。
+     * excludeCategories 在 SQL 里就排除掉，而不是取完再过滤——
+     * 否则被排除的分类仍然占掉名额，监控池会平白少几只。
+     */
+    /**
+     * 按名称重算全库分类，返回改动条数。
+     *
+     * 清单源只覆盖「当前在册」的 ETF：东财那个接口连货币/债券 ETF 都不返回，
+     * 这些标的只能靠历史清单留在库里，category 会永久停在旧规则的判定结果上。
+     * 分类词表一改就必须全库重算，否则监控池还在按旧标签选样——
+     * 表现就是「明明排除了债基，池子里照样有短融、日利」。
+     */
+    reclassifyAll(classify) {
+      const rows = db.prepare('SELECT code, name, category FROM etf').all();
+      const update = db.prepare('UPDATE etf SET category = ? WHERE code = ?');
+      let changed = 0;
+      for (const row of rows) {
+        const next = classify(row.name);
+        if (next === row.category) continue;
+        update.run(next, row.code);
+        changed += 1;
+      }
+      return changed;
+    },
+
+    topByTurnover(limit, excludeCategories = []) {
+      if (!excludeCategories.length) {
+        return db.prepare('SELECT * FROM etf ORDER BY turnover DESC LIMIT ?').all(limit);
+      }
+      const marks = placeholders(excludeCategories.length);
+      return db
+        .prepare(
+          `SELECT * FROM etf WHERE category IS NULL OR category NOT IN (${marks}) ORDER BY turnover DESC LIMIT ?`,
+        )
+        .all(...excludeCategories, limit);
     },
 
     count() {

@@ -1,8 +1,23 @@
 import { notFound } from '../lib/errors.js';
+import { config } from '../config/index.js';
 import { marketPhase, tradeDateOf } from '../lib/time.js';
 import { computeDailyMetrics } from './metricService.js';
 
 const SORTABLE = new Set(['mainNet', 'activeNet', 'net', 'mainRatio', 'pctChg', 'turnover', 'superNet', 'code']);
+
+/** 与监控池共用同一份排除清单，避免「池子里没有、榜上却有」 */
+const EXCLUDED = new Set(config.trackedExcludeCategories);
+
+/**
+ * 默认视图剔除非监控分类。
+ * 被排除的标的不会进清单轮询：行情、净额都停在上一次抓到的时刻，
+ * 摆在榜上只会被当成「数据不更新」。用户主动选中该分类时才给看。
+ */
+function dropExcluded(rows, category) {
+  if (EXCLUDED.size === 0) return rows;
+  if (category) return rows;
+  return rows.filter((row) => !EXCLUDED.has(row.category));
+}
 
 function shapeQuote(live, meta) {
   const mainNet = live?.mainNet ?? meta?.main_net ?? null;
@@ -61,7 +76,7 @@ export function createQueryService({ repos, marketService, intradayService, volu
   }
 
   function listEtfs({ keyword, category, sort = 'mainNet', dir = 'desc', limit = 100, onlyTracked = false } = {}) {
-    let rows = allRows();
+    let rows = dropExcluded(allRows(), category);
     if (onlyTracked) rows = rows.filter((row) => row.tracked);
     if (category) rows = rows.filter((row) => row.category === category);
     if (keyword) {
@@ -76,7 +91,7 @@ export function createQueryService({ repos, marketService, intradayService, volu
   function ranking({ direction = 'inflow', limit = 20, category, onlyTracked = false, metric = 'net' } = {}) {
     const key = SORTABLE.has(metric) ? metric : 'net';
     // 缺测的不参与该口径的排序（但不会因为缺测就从列表里消失，另一个口径还在）
-    let rows = allRows().filter((row) => row[key] !== null && row[key] !== undefined);
+    let rows = dropExcluded(allRows(), category).filter((row) => row[key] !== null && row[key] !== undefined);
     if (onlyTracked) rows = rows.filter((row) => row.tracked);
     if (category) rows = rows.filter((row) => row.category === category);
     rows.sort((a, b) => (direction === 'inflow' ? b[key] - a[key] : a[key] - b[key]));
@@ -85,7 +100,7 @@ export function createQueryService({ repos, marketService, intradayService, volu
 
   function categoryBreakdown() {
     const buckets = new Map();
-    for (const row of allRows()) {
+    for (const row of dropExcluded(allRows())) {
       const key = row.category ?? '其他';
       const bucket = buckets.get(key) ?? { category: key, mainNet: 0, count: 0, inflow: 0, outflow: 0, turnover: 0 };
       const net = row.net ?? 0;
@@ -100,7 +115,7 @@ export function createQueryService({ repos, marketService, intradayService, volu
   }
 
   function overview() {
-    const rows = allRows();
+    const rows = dropExcluded(allRows());
     // 只统计真正拿到资金流数值的标的，避免把「无数据」当作 0 计入合计
     const scoped = rows.filter((row) => typeof row.net === 'number');
     const tracked = scoped.filter((row) => row.tracked);

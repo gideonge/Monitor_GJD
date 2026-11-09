@@ -3,12 +3,16 @@ import { fetchEtfUniverse, fetchQuotes, fetchDailyFlow, getBreakerState, isBreak
 import { fetchEtfUniverseFromSina } from '../providers/sina.js';
 import { fetchMinuteQuotes } from '../providers/tencent.js';
 import { classifyEtf } from '../lib/classify.js';
+import { pickTrackedCodes } from '../lib/trackedPool.js';
 import { tradeDateOf, marketPhase, PHASE_LABEL } from '../lib/time.js';
 import { mapPool, chunk } from '../lib/concurrency.js';
 import { withTransaction } from '../db/index.js';
 import { evaluateRules, persistAlerts } from './alertService.js';
 import { EVENTS } from './events.js';
 import { mergeQuoteFields, overlayUniverseRow } from '../lib/quoteMerge.js';
+
+/** 不监控分类（债券/货币）：监控池、全市场合计共用这一份名单 */
+const EXCLUDED_CATEGORIES = new Set(config.trackedExcludeCategories);
 
 /**
  * 数据采集与状态中枢：
@@ -77,11 +81,16 @@ export function createMarketService({ db, repos, events, logger }) {
   };
 
   function computeAggregate(rows) {
+    // 被排除的分类（债券/货币）不轮询，净额停在最后一次抓到的时刻。
+    // 合计里留着它们，会让「全市场主力净流入」忽大忽小——那不是市场在动，是我们没在采。
+    const scoped = EXCLUDED_CATEGORIES.size
+      ? rows.filter((row) => !EXCLUDED_CATEGORIES.has(row.category))
+      : rows;
     let totalMainNet = 0;
     let inflow = 0;
     let outflow = 0;
     let turnover = 0;
-    for (const row of rows) {
+    for (const row of scoped) {
       // 合计口径与派生指标一致：用主动净买这条连续序列，避免半个市场有主力数据、
       // 半个市场没有时加总出毫无意义的数
       const net = primaryNet(row);
@@ -91,7 +100,15 @@ export function createMarketService({ db, repos, events, logger }) {
       if (net > 0) inflow += 1;
       else if (net < 0) outflow += 1;
     }
-    return { totalMainNet, inflow, outflow, flat: rows.length - inflow - outflow, turnover, sampleSize: rows.length, at: Date.now() };
+    return {
+      totalMainNet,
+      inflow,
+      outflow,
+      flat: scoped.length - inflow - outflow,
+      turnover,
+      sampleSize: scoped.length,
+      at: Date.now(),
+    };
   }
 
   /** 启动时用库内「最近已知快照」填充内存，保证上游不可用时前端仍有数据 */
@@ -189,11 +206,23 @@ export function createMarketService({ db, repos, events, logger }) {
       const now = Date.now();
       const rows = universe.rows.map((row) => ({ ...row, category: classifyEtf(row.name) }));
 
-      withTransaction(db, () => etfRepo.upsertMany(rows, now));
+      // 全库重分类：东财清单不返回货币/债券 ETF，这些行只能靠历史数据留在库里，
+      // 不重算就会一直挂着旧标签，继续混进监控池。
+      let reclassified = 0;
+      withTransaction(db, () => {
+        etfRepo.upsertMany(rows, now);
+        reclassified = etfRepo.reclassifyAll(classifyEtf);
+      });
 
       const pinned = etfRepo.listPinned();
-      const topCodes = etfRepo.topByTurnover(config.universeSize).map((row) => row.code);
-      const trackedCodes = [...new Set([...pinned, ...topCodes])].slice(0, Math.max(config.universeSize, pinned.length));
+      // 债券/货币类不参与递补（config.trackedExcludeCategories），空出的名额
+      // 按成交额顺延给股票型与商品型；SQL 层就排除，不会白占名额。
+      const candidates = etfRepo.topByTurnover(config.universeSize, config.trackedExcludeCategories);
+      const trackedCodes = pickTrackedCodes(candidates, {
+        pinned,
+        size: config.universeSize,
+        excludeCategories: config.trackedExcludeCategories,
+      });
       etfRepo.setTracked(trackedCodes);
 
       // 清单刷新只负责「有哪些标的、叫什么、属于哪类」。
@@ -224,6 +253,13 @@ export function createMarketService({ db, repos, events, logger }) {
         total: rows.length,
         tracked: trackedCodes.length,
         source,
+        excludedCategories: config.trackedExcludeCategories,
+        reclassified,
+        // 分类计数：分类器改词表后，靠这个数字判断新规则是否真的生效
+        categories: rows.reduce((acc, row) => {
+          acc[row.category] = (acc[row.category] ?? 0) + 1;
+          return acc;
+        }, {}),
         durationMs: Date.now() - started,
       });
       events.publish(EVENTS.STATUS, {

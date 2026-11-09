@@ -161,6 +161,16 @@ const config = {
    */
   pollIntervalMs: readInt('POLL_INTERVAL_MS', 60000, { min: 5000, max: 600000 }),
   universeSize: readInt('UNIVERSE_SIZE', 120, { min: 10, max: 1400 }),
+  /**
+   * 不纳入监控池的分类（逗号分隔，空字符串表示全分类都监控）。
+   * 债券/货币 ETF 的成交额来自申赎套利与质押回购，净买额与股票型不可比；
+   * 一并轮询只会占掉名额、把资金流榜顶满。默认排除，需要时改环境变量即可。
+   */
+  trackedExcludeCategories: readString('TRACKED_EXCLUDE_CATEGORIES', '债券货币')
+    .split(/[,，\s]+/)
+    .map((item) => item.trim())
+    .filter(Boolean),
+
   universeRefreshMs: readInt('UNIVERSE_REFRESH_MS', 600000, { min: 60000, max: 86400000 }),
   historyDays: readInt('HISTORY_DAYS', 60, { min: 5, max: 500 }),
   requestTimeoutMs: readInt('REQUEST_TIMEOUT_MS', 9000, { min: 1000, max: 60000 }),

@@ -251,7 +251,13 @@ export function createQueryService({ repos, marketService, intradayService, volu
      * 宁可曲线短一截，也不要在中途跳变。
      */
     const countOf = (key) => flowPoints.filter((row) => row[key] !== null && row[key] !== undefined).length;
-    const flowMetric = countOf('active_net') > countOf('main_net') ? 'activeNet' : 'mainNet';
+    // 口径跟页面其它部分一致：当前实时源是腾讯就用主动净买，是东财就用主力净额。
+    // 之前按「哪种点更多」选，会出现「页面说主动净买、曲线画的却是东财那几分钟」的错位；
+    // 只有该口径当天一条都没有时，才退回另一种。
+    const preferred = marketService.primaryMetric?.() === 'mainNet' ? 'mainNet' : 'activeNet';
+    const fallback = preferred === 'activeNet' ? 'mainNet' : 'activeNet';
+    const countOfMetric = (metric) => countOf(metric === 'activeNet' ? 'active_net' : 'main_net');
+    const flowMetric = countOfMetric(preferred) > 0 ? preferred : fallback;
 
     const { rows: alerts } = alertRepo.list({ code, limit: 20 });
 

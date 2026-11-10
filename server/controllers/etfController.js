@@ -43,8 +43,9 @@ export function createEtfController({ services }) {
       const category = optionalString(query.get('category'), 'category', { max: 20 });
       const onlyTracked = query.get('tracked') === '1' || query.get('tracked') === 'true';
 
-      const rows = queryService.listEtfs({ keyword, category, sort, dir, limit, onlyTracked });
-      sendJson(ctx.res, 200, { rows, total: rows.length, generatedAt: Date.now() });
+      const { rows, summary } = queryService.listEtfs({ keyword, category, sort, dir, limit, onlyTracked });
+      // summary 覆盖「筛选后的全部标的」而不只是这一页，页脚用它显示筛选合计
+      sendJson(ctx.res, 200, { rows, total: rows.length, summary, generatedAt: Date.now() });
     },
 
     ranking(ctx) {
@@ -55,10 +56,13 @@ export function createEtfController({ services }) {
       const onlyTracked = query.get('tracked') === '1' || query.get('tracked') === 'true';
       // metric 决定按哪个口径排序：net（主序列）/ mainNet（主力净额）/ activeNet（主动净买）
       const metric = requireEnum(query.get('metric') ?? 'net', 'metric', ['net', 'mainNet', 'activeNet']);
+      const { rows, summary } = queryService.ranking({ direction, limit, category, onlyTracked, metric });
       sendJson(ctx.res, 200, {
         direction,
         metric,
-        rows: queryService.ranking({ direction, limit, category, onlyTracked, metric }),
+        rows,
+        // 单边 TOP 只给一侧，不带合计用户对不上 KPI：前端页脚用它显示「筛选合计」
+        summary,
         generatedAt: Date.now(),
       });
     },

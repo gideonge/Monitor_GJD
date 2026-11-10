@@ -96,7 +96,19 @@ export function createRankingView({ onSelect }) {
       state.rows = result.rows;
       const stats = renderRows();
       const withData = state.rows.filter((row) => row.net !== null && row.net !== undefined).length;
-      const notes = [`共 ${state.rows.length} 条，其中 ${withData} 条含资金流数据`];
+      // 页脚先给「筛选合计」：榜上只有单边 TOP，不给合计就无法与顶部 KPI 对上，
+      // 用户会以为「列表全是流入，合计却是负的」是数据错了
+      const summary = result.summary;
+      const notes = [];
+      if (summary && summary.withValue > 0) {
+        const metricName =
+          summary.metric === 'mainNet' ? '主力净额' : summary.metric === 'activeNet' ? '主动净买' : '';
+        notes.push(
+          `共 ${summary.count} 条 · ${metricName}合计 ${fmtAmount(summary.netSum)} · 流入 ${summary.inflow} / 流出 ${summary.outflow}`,
+        );
+      } else {
+        notes.push(`共 ${state.rows.length} 条，其中 ${withData} 条含资金流数据`);
+      }
       // 「80 条全部停更」和「零星几条停更」是两件不同的事：
       // 前者是整条源不可用（东财被拒时主力净额全体冻结），后者是单只标的没跟上。
       // 统一写成「N 条停更」会让前者看起来像一堆脏数据，改为如实说「整体停更」。

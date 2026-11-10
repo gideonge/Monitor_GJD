@@ -84,12 +84,7 @@ function renderKpis(data) {
   // 不能依赖 updateStatus 的副作用。
   const netLabel = data.status?.dataSource?.defaultMetric === 'activeNet' ? '主动净买' : '主力净流入';
   const label = $('#kpi-market-label');
-  if (label) {
-    const sampled = market.sampleSize ?? 0;
-    const universe = market.universeSize ?? 0;
-    label.textContent =
-      universe > 0 && sampled < universe ? `全市场${netLabel}（采样 ${sampled} 只）` : `全市场${netLabel}`;
-  }
+  if (label) label.textContent = `全市场${netLabel}`;
   const trackedLabel = $('#kpi-tracked-label');
   if (trackedLabel) trackedLabel.textContent = `监控池${netLabel}`;
   // 分类聚合走的是同一份 row.net，标题也必须跟着同一口径，否则图上标错。
@@ -97,23 +92,30 @@ function renderKpis(data) {
   if (catNote) catNote.textContent = `${netLabel === '主动净买' ? '主动净买' : '主力净额'}合计`;
 
   $('#kpi-market-net').innerHTML = `<span class="${signClass(market.totalMainNet)}">${fmtAmount(market.totalMainNet)}</span>`;
+  // 「采样 N 只」必须说清是「当日已更新」的只数：库里挂着的旧值不能被当成今天的成交量，
+  // 否则会出现「全市场净流出 30 亿」，实际只有监控池那 120 只在流出。
+  const staleNote = market.staleCount > 0 ? `（${fmtInt(market.staleCount)} 只用旧值）` : '';
   $('#kpi-market-sub').innerHTML = `流入 <b>${fmtInt(market.inflow)}</b> 家 · 流出 <b>${fmtInt(
     market.outflow,
-  )}</b> 家 · 采样 <b>${fmtInt(market.sampleSize)}</b> / ${fmtInt(market.universeSize)} 只`;
+  )}</b> 家 · 当日 ${fmtInt(market.sampleSize)} / ${fmtInt(market.universeSize)} 只${staleNote}`;
 
   $('#kpi-tracked-net').innerHTML = `<span class="${signClass(tracked.totalMainNet)}">${fmtAmount(
     tracked.totalMainNet,
   )}</span>`;
-  $('#kpi-tracked-sub').innerHTML = `监控池 <b>${fmtInt(tracked.sampleSize)}</b> 只 · 成交额 <b>${fmtAmount(
-    tracked.totalTurnover,
-    { sign: false },
-  )}</b>`;
+  // 监控池这一格必须带流入/流出家数：只给合计时，用户看到「流水全是正的、合计却是负的」
+  // 会以为是数据错了，其实是流出那几只不在当前这一屏里。
+  $('#kpi-tracked-sub').innerHTML = `流入 <b>${fmtInt(tracked.inflow)}</b> / 流出 <b>${fmtInt(
+    tracked.outflow,
+  )}</b> 家 · 成交额 <b>${fmtAmount(tracked.totalTurnover, { sign: false })}</b>`;
 
   $('#kpi-breadth').innerHTML = `<span class="num-in">${fmtInt(market.inflow)}</span> <span style="color:var(--muted)">/</span> <span class="num-out">${fmtInt(
     market.outflow,
   )}</span>`;
   const ratio = market.sampleSize > 0 ? (market.inflow / market.sampleSize) * 100 : 0;
-  $('#kpi-breadth-sub').innerHTML = `流入占比 <b>${ratio.toFixed(1)}%</b> · 全市场 ETF`;
+  // 分母是「当日已更新」的只数，不是全库标的数——沿用旧值的不能算进涨跌家数
+  $('#kpi-breadth-sub').innerHTML = `流入占比 <b>${ratio.toFixed(
+    1,
+  )}%</b> · 当日 ${fmtInt(market.sampleSize)} 只`;
 
   const highCount = (alertStats.bySeverity ?? []).find((item) => item.severity === 'high')?.count ?? 0;
   $('#kpi-alerts').textContent = fmtInt(alertStats.total ?? 0);

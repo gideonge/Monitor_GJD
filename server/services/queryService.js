@@ -19,6 +19,27 @@ function dropExcluded(rows, category) {
   return rows.filter((row) => !EXCLUDED.has(row.category));
 }
 
+/**
+ * 筛选范围内按某口径汇总。
+ * 单边 TOP 列表只给一侧，不带合计用户就对不上 KPI 卡：
+ * 「列表全是 +2 亿，上面合计却是 −30 亿」这种困惑全是缺这一行造成的。
+ */
+function summarize(rows, key = 'net') {
+  let netSum = 0;
+  let inflow = 0;
+  let outflow = 0;
+  let withValue = 0;
+  for (const row of rows) {
+    const value = row[key];
+    if (value === null || value === undefined) continue;
+    withValue += 1;
+    netSum += value;
+    if (value > 0) inflow += 1;
+    else if (value < 0) outflow += 1;
+  }
+  return { count: rows.length, withValue, netSum, inflow, outflow };
+}
+
 function shapeQuote(live, meta) {
   const mainNet = live?.mainNet ?? meta?.main_net ?? null;
   const activeNet = live?.activeNet ?? meta?.active_net ?? null;
@@ -53,13 +74,39 @@ export function createQueryService({ repos, marketService, intradayService, volu
   function allRows() {
     const quotes = marketService.getQuotes();
     const metas = etfRepo.listVisible({ limit: 3000 });
+    const metric = marketService.primaryMetric?.() ?? 'activeNet';
     return metas.map((meta) => {
       const row = shapeQuote(quotes.get(meta.code) ?? null, meta);
       // 主口径跟随「当前在实时更新的源」：东财可用用主力净额，降级用主动净买。
       // 缺了就回落到另一列，但绝不把两者相加或互相顶替。
       if (marketService.primaryNet) row.net = marketService.primaryNet(row) ?? row.net;
+      // netTs 必须跟着 net 的来源走：主力净额来自东财、主动净买来自腾讯，
+      // 两个时间戳互不推进，取错就会把「三天前的净额」当成今天的成交量看。
+      const hasPrimary = row[metric] !== null && row[metric] !== undefined;
+      if (hasPrimary) {
+        row.netTs = metric === 'mainNet' ? row.mainTs : row.activeTs;
+      } else if (row.activeNet !== null && row.activeNet !== undefined) {
+        row.netTs = row.activeTs;
+      } else {
+        row.netTs = row.mainTs;
+      }
       return row;
     });
+  }
+
+  /**
+   * 全市场最新一批净额所属的交易日：非交易日时它就是上一交易日。
+   * 取 90% 分位而不是最大值——个别标的时间戳异常（未来时间、时区错乱）
+   * 会把整个市场判成「陈旧」，导致首页合计突然清零。
+   */
+  function latestBookDate(rows) {
+    const stamps = rows
+      .map((row) => row.netTs ?? 0)
+      .filter((ts) => ts > 0)
+      .sort((a, b) => a - b);
+    if (stamps.length === 0) return null;
+    const index = Math.min(stamps.length - 1, Math.floor(stamps.length * 0.9));
+    return tradeDateOf(stamps[index]);
   }
 
   function sortRows(rows, sort, dir) {
@@ -85,7 +132,12 @@ export function createQueryService({ repos, marketService, intradayService, volu
         (row) => row.code.includes(text) || String(row.name).toLowerCase().includes(text),
       );
     }
-    return sortRows(rows, sort, dir).slice(0, limit);
+    // 合计跟着「当前排序那一列」走：用户按主动净买排，页脚就该是主动净买的合计，
+    // 否则又会变成「列里全是正数、合计却是另一口径的负数」。
+    // 按涨跌幅、成交额这类非净额字段排序时，合计退回主口径 net。
+    const summaryKey = ['mainNet', 'activeNet', 'net', 'superNet'].includes(sort) ? sort : 'net';
+    const summary = { ...summarize(rows, summaryKey), metric: summaryKey };
+    return { rows: sortRows(rows, sort, dir).slice(0, limit), summary };
   }
 
   function ranking({ direction = 'inflow', limit = 20, category, onlyTracked = false, metric = 'net' } = {}) {
@@ -94,8 +146,11 @@ export function createQueryService({ repos, marketService, intradayService, volu
     let rows = dropExcluded(allRows(), category).filter((row) => row[key] !== null && row[key] !== undefined);
     if (onlyTracked) rows = rows.filter((row) => row.tracked);
     if (category) rows = rows.filter((row) => row.category === category);
+    // 合计先算：榜上只给单边 TOP，用户看不到另一侧，
+    // 不给合计就会出现「列表全是 +2 亿，上面合计却是 −30 亿」的困惑
+    const summary = { ...summarize(rows, key), metric: key };
     rows.sort((a, b) => (direction === 'inflow' ? b[key] - a[key] : a[key] - b[key]));
-    return rows.slice(0, limit);
+    return { rows: rows.slice(0, limit), summary };
   }
 
   function categoryBreakdown() {
@@ -117,7 +172,13 @@ export function createQueryService({ repos, marketService, intradayService, volu
   function overview() {
     const rows = dropExcluded(allRows());
     // 只统计真正拿到资金流数值的标的，避免把「无数据」当作 0 计入合计
-    const scoped = rows.filter((row) => typeof row.net === 'number');
+    const quoted = rows.filter((row) => typeof row.net === 'number');
+    // 「库里有个数」不等于「今天有数据」：每分钟只轮询监控池，
+    // 清单外标的的净额会一直挂着上一次抓到的值。全算进合计，
+    // 就会出现「全市场净流出 30 亿」，其实只有监控池那 120 只在流出。
+    const bookDate = latestBookDate(quoted);
+    const scoped = bookDate ? quoted.filter((row) => tradeDateOf(row.netTs ?? 0) === bookDate) : quoted;
+    const staleCount = quoted.length - scoped.length;
     const tracked = scoped.filter((row) => row.tracked);
     const sum = (list, key) => list.reduce((total, row) => total + (row[key] ?? 0), 0);
     const count = (list, predicate) => list.filter(predicate).length;
@@ -129,6 +190,9 @@ export function createQueryService({ repos, marketService, intradayService, volu
         inflow: count(scoped, (row) => (row.net ?? 0) > 0),
         outflow: count(scoped, (row) => (row.net ?? 0) < 0),
         sampleSize: scoped.length,
+        /** 有净额但属于更早交易日、没算进合计的标的数 */
+        staleCount,
+        bookDate,
         universeSize: rows.length,
       },
       tracked: {
@@ -140,8 +204,8 @@ export function createQueryService({ repos, marketService, intradayService, volu
         outflow: count(tracked, (row) => (row.net ?? 0) < 0),
         sampleSize: tracked.length,
       },
-      topInflow: ranking({ direction: 'inflow', limit: 6 }),
-      topOutflow: ranking({ direction: 'outflow', limit: 6 }),
+      topInflow: ranking({ direction: 'inflow', limit: 6 }).rows,
+      topOutflow: ranking({ direction: 'outflow', limit: 6 }).rows,
       categories: categoryBreakdown(),
       snapshotAt: Math.max(0, ...rows.map((row) => row.quoteTs ?? 0)),
       coverage: count(rows, (row) => row.quoteTs !== null && row.quoteTs !== undefined),

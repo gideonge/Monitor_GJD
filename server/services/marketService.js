@@ -4,6 +4,7 @@ import { fetchEtfUniverseFromSina } from '../providers/sina.js';
 import { fetchMinuteQuotes } from '../providers/tencent.js';
 import { classifyEtf } from '../lib/classify.js';
 import { pickTrackedCodes } from '../lib/trackedPool.js';
+import { buildSnapshotRows } from '../lib/snapshotRow.js';
 import { tradeDateOf, marketPhase, PHASE_LABEL } from '../lib/time.js';
 import { mapPool, chunk } from '../lib/concurrency.js';
 import { withTransaction } from '../db/index.js';
@@ -295,12 +296,6 @@ export function createMarketService({ db, repos, events, logger }) {
     }
   }
 
-  function snapshotTsOf(quote) {
-    const now = Date.now();
-    if (quote.quoteTs && Math.abs(now - quote.quoteTs) < 4 * 86400 * 1000) return quote.quoteTs;
-    return now;
-  }
-
   /**
    * 拉快照：东财优先，失败即切腾讯批量快照。
    *
@@ -348,24 +343,7 @@ export function createMarketService({ db, repos, events, logger }) {
       }
 
       const now = Date.now();
-      const rows = quotes.map((quote) => {
-        const ts = snapshotTsOf(quote);
-        return {
-          code: quote.code,
-          ts,
-          tradeDate: tradeDateOf(ts),
-          mainNet: quote.mainNet,
-          superNet: quote.superNet,
-          bigNet: quote.bigNet,
-          midNet: quote.midNet,
-          smallNet: quote.smallNet,
-          mainRatio: quote.mainRatio,
-          price: quote.price,
-          pctChg: quote.pctChg,
-          turnover: quote.turnover,
-          source: quoteSource === 'eastmoney' ? 'live' : `live-${quoteSource}`,
-        };
-      });
+      const rows = buildSnapshotRows(quotes, quoteSource === 'eastmoney' ? 'live' : `live-${quoteSource}`, { now });
 
       const inserted = withTransaction(db, () => {
         const count = flowRepo.insertSnapshots(rows);

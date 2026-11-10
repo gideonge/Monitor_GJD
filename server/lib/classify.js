@@ -48,3 +48,13 @@ export function classifyEtf(name) {
   }
   return '其他';
 }
+
+/**
+ * 前端可选分类：被排除监控的分类不再出现在筛选下拉与规则表单里。
+ * 分类本身仍保留在 CATEGORIES 中——存量规则可能引用了它，
+ * 校验照样要认，只是不再让人新选。
+ */
+export function visibleCategories(exclude = []) {
+  if (!exclude.length) return CATEGORIES;
+  return CATEGORIES.filter((category) => !exclude.includes(category));
+}

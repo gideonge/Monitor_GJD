@@ -1,6 +1,7 @@
 import { sendJson } from '../lib/http.js';
 import { METRICS, TIMEFRAMES, COMPARATORS, SEVERITIES, SCOPES, DEFAULT_RULES } from '../repositories/ruleRepo.js';
-import { CATEGORIES } from '../lib/classify.js';
+import { visibleCategories } from '../lib/classify.js';
+import config from '../config/index.js';
 
 const VERSION = '1.0.0';
 
@@ -75,7 +76,8 @@ export function createMetaController({ services }) {
         comparators: COMPARATORS,
         severities: SEVERITIES,
         scopes: SCOPES,
-        categories: CATEGORIES,
+        // 被排除监控的分类（债券/货币）不再出现在筛选下拉里
+        categories: visibleCategories(config.trackedExcludeCategories),
         defaultRules: DEFAULT_RULES,
       });
     },

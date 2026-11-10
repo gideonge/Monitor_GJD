@@ -215,6 +215,11 @@ export function createQueryService({ repos, marketService, intradayService, volu
   function detail(code) {
     const meta = etfRepo.get(code);
     const quote = marketService.getQuotes().get(code) ?? null;
+    // 被排除监控的分类（债券/货币）连详情都不再提供：
+    // 它们不在清单轮询里，分时与净额都停在很久以前，点进去只会看到一个静止的页面
+    if (meta && EXCLUDED.has(meta.category)) {
+      throw notFound(`未监控 ${code}：${meta.category} 已不在监控范围`);
+    }
     if (!meta && !quote) throw notFound(`未找到 ETF：${code}`);
 
     const daily = flowRepo.dailySeries(code, 60);

@@ -204,7 +204,14 @@ export function createMarketService({ db, repos, events, logger }) {
       const started = Date.now();
       const { universe, source, degraded } = await loadUniverse();
       const now = Date.now();
-      const rows = universe.rows.map((row) => ({ ...row, category: classifyEtf(row.name) }));
+      const mapped = universe.rows.map((row) => ({ ...row, category: classifyEtf(row.name) }));
+      // 不入库，而不是入库后再隐藏：新浪清单会带回一批债券/货币 ETF，
+      // 它们不参与轮询，落库只会让「覆盖标的」虚高、并在各种查询里当成不更新的数据。
+      // 东财清单本来就不返回它们，所以这条只在降级到新浪时起作用。
+      const rows = EXCLUDED_CATEGORIES.size
+        ? mapped.filter((row) => !EXCLUDED_CATEGORIES.has(row.category))
+        : mapped;
+      const dropped = mapped.length - rows.length;
 
       // 全库重分类：东财清单不返回货币/债券 ETF，这些行只能靠历史数据留在库里，
       // 不重算就会一直挂着旧标签，继续混进监控池。
@@ -233,6 +240,12 @@ export function createMarketService({ db, repos, events, logger }) {
       for (const row of rows) {
         merged.set(row.code, overlayUniverseRow(merged.get(row.code) ?? null, row));
       }
+      // 内存里也别留被排除分类的残影：清单不覆盖它们，行情会一直冻在那里
+      if (EXCLUDED_CATEGORIES.size) {
+        for (const [code, row] of merged) {
+          if (EXCLUDED_CATEGORIES.has(row.category)) merged.delete(code);
+        }
+      }
       state.quotes = merged;
       state.universeRows = rows;
       state.universeTotal = rows.length;
@@ -254,6 +267,8 @@ export function createMarketService({ db, repos, events, logger }) {
         tracked: trackedCodes.length,
         source,
         excludedCategories: config.trackedExcludeCategories,
+        /** 清单里被丢弃的标的数（新浪清单会带回债券/货币 ETF） */
+        dropped,
         reclassified,
         // 分类计数：分类器改词表后，靠这个数字判断新规则是否真的生效
         categories: rows.reduce((acc, row) => {

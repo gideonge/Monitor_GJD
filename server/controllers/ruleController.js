@@ -3,7 +3,8 @@ import { mapRuleRow } from '../lib/serialize.js';
 import { notFound, ValidationError } from '../lib/errors.js';
 import { requireInt, requireString, requireNumber, requireEnum } from '../lib/validate.js';
 import { METRICS, SEVERITIES, COMPARATORS, SCOPES, TIMEFRAMES } from '../repositories/ruleRepo.js';
-import { CATEGORIES } from '../lib/classify.js';
+import { CATEGORIES, visibleCategories } from '../lib/classify.js';
+import config from '../config/index.js';
 
 /** 规则入参校验：所有字段在边界处收敛，服务层不再做防御性判断 */
 function validateRuleInput(body, { partial = false } = {}) {
@@ -86,7 +87,8 @@ export function createRuleController({ services }) {
       sendJson(ctx.res, 200, {
         rows: rows.map(mapRuleRow),
         metrics: METRICS,
-        categories: CATEGORIES,
+        // 校验仍用 CATEGORIES（存量规则可能引用已屏蔽分类），但下拉只给可见的
+        categories: visibleCategories(config.trackedExcludeCategories),
       });
     },
 

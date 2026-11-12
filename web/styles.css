@@ -596,9 +596,12 @@ table.data tbody td.wrap {
   background: #f7f9fb;
 }
 
-.alert-card.sev-high { border-left-color: var(--in); }
-.alert-card.sev-medium { border-left-color: var(--warn); }
-.alert-card.sev-low { border-left-color: var(--neutral); }
+/* 左侧色条只表示资金方向：红 = 正向（净流入），绿 = 负向（净流出）。
+   级别由卡片内的「高/中/低」标签表达，不再占用色条，
+   否则「高」级别的流出也会是红条，方向与级别互相打架。 */
+.alert-card.dir-in { border-left-color: var(--in); }
+.alert-card.dir-out { border-left-color: var(--out); }
+.alert-card.dir-none { border-left-color: var(--neutral); }
 
 .alert-card.is-new {
   animation: slidein 0.4s ease-out;

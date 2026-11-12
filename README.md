@@ -31,6 +31,8 @@
 
 结构化字段与文案同步返回：`etfName` / `value`（变动量）/ `triggeredAt`（触发时间）/ `conditionText`（触发条件）。
 
+实时告警卡片左侧色条只表示**资金方向**：红 = 正向（净流入），绿 = 负向（净流出），灰 = 无方向。级别由卡片内的「高 / 中 / 低」标签表示，不占用色条——色条一旦兼职表示级别，「高」级别的流出也会是红条，方向就被读反。量能类指标（`volume_surge` / `volume_preburst`）的实测值是倍数、本身没有资金方向，固定走中性灰，避免把「放量」读成「流入」。判定逻辑收敛在 `web/js/format.js` 的 `flowDirectionClass`，由 `tests/format.test.js` 锁定。
+
 ---
 
 ## 2. 快速开始

@@ -87,6 +87,25 @@ export function signClass(value) {
   return 'num-flat';
 }
 
+/**
+ * 实测值没有方向的指标：它们是「倍数」，正负不代表资金进出。
+ * 与服务端 METRICS 中 volume_surge / volume_preburst 的取值口径对应。
+ */
+const DIRECTIONLESS_METRICS = new Set(['volume_surge', 'volume_preburst']);
+
+/**
+ * 告警卡片左侧色条的语义：红 = 正向（净流入），绿 = 负向（净流出）。
+ *
+ * 色条只承接方向，不承接级别：级别一旦也压在色条上，「高」级别的流出
+ * 就会被画成红条，方向被读反。量能类指标是倍数、没有方向，返回 dir-none 走中性灰。
+ */
+export function flowDirectionClass(metric, value) {
+  if (DIRECTIONLESS_METRICS.has(metric)) return 'dir-none';
+  const num = Number(value);
+  if (!Number.isFinite(num) || num === 0) return 'dir-none';
+  return num > 0 ? 'dir-in' : 'dir-out';
+}
+
 export function debounce(fn, wait = 250) {
   let timer = null;
   return (...args) => {

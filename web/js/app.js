@@ -10,6 +10,7 @@ import {
   fmtInt,
   fmtMetricValue,
   fmtSignedPct,
+  flowDirectionClass,
   signClass,
 } from './format.js';
 import { createRankingView } from './views/ranking.js';
@@ -238,11 +239,17 @@ const isVolumeMetric = (metric) => VOLUME_METRICS.has(metric);
 
 const liveItems = [];
 
+/**
+ * 卡片左侧色条只表达资金方向：红 = 正向（净流入），绿 = 负向（净流出）。
+ * 级别由「高/中/低」标签表达，不再占用色条——否则「高」级别的流出也会是红条。
+ * 量能类指标的实测值是倍数、没有方向，走中性灰，避免把「放量」读成「流入」。
+ * 判定逻辑集中在 format.js 的 flowDirectionClass，色条语义只在一处维护。
+ */
 function alertCardHtml(alert, isNew = false) {
   const valueText = fmtMetricValue(alert.metric, alert.value);
   // 量能突变 / 分钟内爆量的实测值是倍数，没有资金方向，用中性色而不是红绿
   const valueCls = isVolumeMetric(alert.metric) ? '' : signClass(alert.value);
-  return `<div class="alert-card sev-${alert.severity}${isNew ? ' is-new' : ''}" data-code="${escapeHtml(
+  return `<div class="alert-card ${flowDirectionClass(alert.metric, alert.value)}${isNew ? ' is-new' : ''}" data-code="${escapeHtml(
     alert.code,
   )}">
     <div class="alert-top">

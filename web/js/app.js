@@ -2,6 +2,7 @@ import { api } from './api.js';
 import {
   $,
   $$,
+  alertDirection,
   debounce,
   escapeHtml,
   fmtAmount,
@@ -10,7 +11,6 @@ import {
   fmtInt,
   fmtMetricValue,
   fmtSignedPct,
-  flowDirectionClass,
   signClass,
 } from './format.js';
 import { createRankingView } from './views/ranking.js';
@@ -240,24 +240,39 @@ const isVolumeMetric = (metric) => VOLUME_METRICS.has(metric);
 const liveItems = [];
 
 /**
- * 卡片左侧色条只表达资金方向：红 = 正向（净流入），绿 = 负向（净流出）。
- * 级别由「高/中/低」标签表达，不再占用色条——否则「高」级别的流出也会是红条。
- * 量能类指标的实测值是倍数、没有方向，走中性灰，避免把「放量」读成「流入」。
- * 判定逻辑集中在 format.js 的 flowDirectionClass，色条语义只在一处维护。
+ * 卡片底色与左侧色条只表达方向：红 = 正向（净流入 / 价格向上），绿 = 负向（净流出 / 价格向下）。
+ * 级别由「高/中/低」标签表达，不占用颜色——否则「高」级别的流出也会是红色系。
+ * 量能类指标的方向先看该分钟涨跌幅，没动时退到主动净买额，两者都没有就保持中性；
+ * 判定与颜色依据的选取都在 format.js 的 alertDirection 里，只在一处维护。
  */
 function alertCardHtml(alert, isNew = false) {
   const valueText = fmtMetricValue(alert.metric, alert.value);
-  // 量能突变 / 分钟内爆量的实测值是倍数，没有资金方向，用中性色而不是红绿
+  const { dir, evidence } = alertDirection({
+    metric: alert.metric,
+    value: alert.value,
+    priceMovePct: alert.priceMovePct,
+    netFlow: alert.netFlow,
+  });
+  // 量能突变 / 分钟内爆量的实测值是倍数，倍数本身没有资金方向，用中性色
   const valueCls = isVolumeMetric(alert.metric) ? '' : signClass(alert.value);
-  return `<div class="alert-card ${flowDirectionClass(alert.metric, alert.value)}${isNew ? ' is-new' : ''}" data-code="${escapeHtml(
-    alert.code,
-  )}">
+  // 倍数旁边标出方向依据：底色变红/变绿时，读者要能立刻看到凭什么
+  const moveCls = dir === 'dir-in' ? 'num-in' : 'num-out';
+  const moveText =
+    evidence === 'price'
+      ? `<span class="alert-move ${moveCls}">${fmtSignedPct(alert.priceMovePct)}</span>`
+      : evidence === 'net'
+        ? `<span class="alert-move ${moveCls}">${Number(alert.netFlow) > 0 ? '净买' : '净卖'} ${fmtAmount(
+            Math.abs(Number(alert.netFlow)),
+            { sign: false },
+          )}</span>`
+        : '';
+  return `<div class="alert-card ${dir}${isNew ? ' is-new' : ''}" data-code="${escapeHtml(alert.code)}">
     <div class="alert-top">
       <span class="alert-name">${escapeHtml(alert.etfName)}</span>
       <span class="alert-time">${escapeHtml(alert.triggeredAtText ?? fmtDateTime(alert.triggeredAt))}</span>
     </div>
     <div class="alert-body">
-      <span class="${valueCls}">${valueText}</span>
+      <span class="${valueCls}">${valueText}</span>${moveText}
       <span class="tag ${alert.severity}">${SEVERITY_TEXT[alert.severity] ?? alert.severity}</span>
       <span style="color:var(--muted);font-size:11px">${escapeHtml(alert.ruleName)}</span>
     </div>

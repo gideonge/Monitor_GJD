@@ -23,6 +23,13 @@ export function mapAlertRow(row) {
     message: row.message,
     source: row.source,
     tradeDate: row.trade_date,
+    /**
+     * 量能类告警的方向证据：该分钟涨跌幅（%）与主动净买额（元）。
+     * 资金类指标为空，方向看 value 正负。前端据此决定告警卡底色与色条，
+     * SSE 事件与列表读库必须给出同一套字段。
+     */
+    priceMovePct: row.price_move_pct ?? null,
+    netFlow: row.net_flow ?? null,
     triggeredAt: row.triggered_at,
     triggeredAtText: formatDateTime(row.triggered_at),
     acknowledged: Boolean(row.acknowledged),

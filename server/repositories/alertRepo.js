@@ -3,8 +3,8 @@ export function createAlertRepo(db) {
     INSERT INTO alert
       (rule_id, rule_name, code, etf_name, category, metric, timeframe, comparator, threshold,
        value, delta, baseline, window_sec, severity, condition_text, message, dedupe_key,
-       source, trade_date, triggered_at, acknowledged, acknowledged_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL)
+       source, trade_date, triggered_at, price_move_pct, net_flow, acknowledged, acknowledged_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL)
     ON CONFLICT(rule_id, code, dedupe_key) DO NOTHING
   `);
 
@@ -32,6 +32,8 @@ export function createAlertRepo(db) {
         alert.source ?? 'live',
         alert.tradeDate ?? null,
         alert.triggeredAt,
+        alert.priceMovePct ?? null,
+        alert.netFlow ?? null,
       );
       if (Number(result.changes ?? 0) === 0) return null;
       return Number(result.lastInsertRowid);

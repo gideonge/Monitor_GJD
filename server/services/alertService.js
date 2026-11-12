@@ -277,6 +277,8 @@ export function persistSurgeAlerts({ candidates, alertRepo, events, logger, para
 
     const conditionText = buildSurgeConditionText(rule, params);
     const message = buildSurgeMessage({ etf, event });
+    // 量能倍数是「多大」，价格涨跌才是「向哪边」；后者落库供前端上色
+    const priceMovePct = Number.isFinite(event.tickRet) ? event.tickRet : null;
 
     const id = alertRepo.insert({
       ruleId: rule.id,
@@ -299,6 +301,7 @@ export function persistSurgeAlerts({ candidates, alertRepo, events, logger, para
       source,
       tradeDate,
       triggeredAt: event.ts,
+      priceMovePct,
     });
     if (id === null) continue;
 
@@ -328,6 +331,7 @@ export function persistSurgeAlerts({ candidates, alertRepo, events, logger, para
       minute: event.minute,
       level: event.level,
       direction: event.direction,
+      priceMovePct,
       tradeDate,
     };
 
@@ -524,6 +528,9 @@ export function persistPreburstAlerts({ candidates, alertRepo, events, logger, p
 
     const conditionText = buildPreburstConditionText(rule, params);
     const message = buildPreburstMessage({ etf, evaluation, params });
+    // 第 9 秒就判定的预警经常「价格还没走」：此时涨跌幅为 0，用主动净买额兜底方向
+    const priceMovePct = Number.isFinite(evaluation.priceMovePct) ? evaluation.priceMovePct : null;
+    const netFlow = Number.isFinite(evaluation.net) ? evaluation.net : null;
 
     const id = alertRepo.insert({
       ruleId: rule.id,
@@ -546,6 +553,8 @@ export function persistPreburstAlerts({ candidates, alertRepo, events, logger, p
       source,
       tradeDate,
       triggeredAt: evaluation.lastTs,
+      priceMovePct,
+      netFlow,
     });
     if (id === null) continue;
 
@@ -575,6 +584,8 @@ export function persistPreburstAlerts({ candidates, alertRepo, events, logger, p
       minute: evaluation.minute,
       level: evaluation.level,
       direction: evaluation.direction,
+      priceMovePct,
+      netFlow,
       early: true,
       elapsedSec: evaluation.elapsedSec,
       projectedAmount: evaluation.projectedAmount,

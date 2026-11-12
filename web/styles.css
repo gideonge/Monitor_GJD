@@ -12,6 +12,11 @@
   --in-soft: rgba(194, 69, 47, 0.09);
   --out: #22795c;
   --out-soft: rgba(34, 121, 92, 0.09);
+  /* 告警卡的淡底色：浅到不影响文字，深到能一眼分出红绿 */
+  --in-tint: rgba(194, 69, 47, 0.06);
+  --in-tint-hover: rgba(194, 69, 47, 0.12);
+  --out-tint: rgba(34, 121, 92, 0.06);
+  --out-tint-hover: rgba(34, 121, 92, 0.12);
   --accent: #3d6591;
   --accent-soft: rgba(61, 101, 145, 0.09);
   --warn: #a97717;
@@ -596,11 +601,22 @@ table.data tbody td.wrap {
   background: #f7f9fb;
 }
 
-/* 左侧色条只表示资金方向：红 = 正向（净流入），绿 = 负向（净流出）。
-   级别由卡片内的「高/中/低」标签表达，不再占用色条，
-   否则「高」级别的流出也会是红条，方向与级别互相打架。 */
-.alert-card.dir-in { border-left-color: var(--in); }
-.alert-card.dir-out { border-left-color: var(--out); }
+/* 底色 + 左侧色条只表示方向：红 = 正向（净流入 / 价格向上），绿 = 负向（净流出 / 价格向下）。
+   级别由卡片内的「高/中/低」标签表达，不占用颜色，否则「高」级别的流出也会是红色系。
+   底色取 6% 混合：白底上仍能看出淡红/淡绿，正文对比度保持在 15:1 以上，
+   文字层级（标题 / 数值 / 条件文案）不受影响；悬停加深到 12% 表示可点。 */
+.alert-card.dir-in {
+  border-left-color: var(--in);
+  background: var(--in-tint);
+}
+.alert-card.dir-in:hover { background: var(--in-tint-hover); }
+
+.alert-card.dir-out {
+  border-left-color: var(--out);
+  background: var(--out-tint);
+}
+.alert-card.dir-out:hover { background: var(--out-tint-hover); }
+
 .alert-card.dir-none { border-left-color: var(--neutral); }
 
 .alert-card.is-new {
@@ -651,6 +667,14 @@ table.data tbody td.wrap {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* 量能类告警的涨跌幅：倍数是「多大」，这一格才是「向哪边」，底色变红变绿的依据 */
+.alert-move {
+  font-size: 11px;
+  font-family: var(--mono);
+  /* 紧跟倍数，不要和后面的级别标签等距 */
+  margin-left: -4px;
 }
 
 .empty {

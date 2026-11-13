@@ -20,7 +20,6 @@ export function createAlertsView({ toast, onOpenCode }) {
     pageSize: 50,
     severity: '',
     metric: '',
-    acknowledged: '',
     // 时间范围直接存控件的原始取值：'today' / '' / '24' / '72' / '168'
     // 默认「最近交易日」：与顶部徽标、KPI 卡同一个口径，避免「徽标 204 / 列表 5680」这种对不上的情况
     range: 'today',
@@ -35,7 +34,7 @@ export function createAlertsView({ toast, onOpenCode }) {
 
   /** 除时间范围外，是否还叠加了别的筛选 */
   function hasExtraFilters() {
-    return Boolean(state.severity || state.metric || state.acknowledged || state.code);
+    return Boolean(state.severity || state.metric || state.code);
   }
 
   /** 时间范围 → 请求参数：range=today 由服务端按「最近交易日」换算，其余走滚动小时数 */
@@ -52,7 +51,7 @@ export function createAlertsView({ toast, onOpenCode }) {
 
   function renderRows() {
     if (state.rows.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="8"><div class="empty">暂无告警记录</div></td></tr>';
+      tbody.innerHTML = '<tr><td colspan="6"><div class="empty">暂无告警记录</div></td></tr>';
     } else {
       tbody.innerHTML = state.rows
         .map((row) => {
@@ -76,8 +75,6 @@ export function createAlertsView({ toast, onOpenCode }) {
             <td class="num" style="color:${valueColor}">${valueText}</td>
             <td class="wrap" style="color:var(--ink-2)">${escapeHtml(row.conditionText)}</td>
             <td style="color:var(--muted)">${escapeHtml(row.ruleName)}</td>
-            <td>${row.acknowledged ? '<span class="tag">已确认</span>' : '<span class="tag medium">未确认</span>'}</td>
-            <td>${row.acknowledged ? '' : `<button class="btn btn-sm btn-ghost" data-ack="${row.id}">确认</button>`}</td>
           </tr>`;
         })
         .join('');
@@ -128,7 +125,6 @@ export function createAlertsView({ toast, onOpenCode }) {
           offset: state.page * state.pageSize,
           severity: state.severity || undefined,
           metric: state.metric || undefined,
-          acknowledged: state.acknowledged || undefined,
           ...timeQuery(),
           code: state.code || undefined,
         }),
@@ -139,25 +135,13 @@ export function createAlertsView({ toast, onOpenCode }) {
       state.sessionTotal = summary?.today?.total ?? state.sessionTotal;
       renderRows();
     } catch (error) {
-      tbody.innerHTML = `<tr><td colspan="8"><div class="empty">加载失败：${escapeHtml(error.message)}</div></td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="6"><div class="empty">加载失败：${escapeHtml(error.message)}</div></td></tr>`;
     } finally {
       state.loading = false;
     }
   }
 
-  tbody.addEventListener('click', async (event) => {
-    const ackButton = event.target.closest('button[data-ack]');
-    if (ackButton) {
-      event.stopPropagation();
-      try {
-        await api.ackAlert(ackButton.dataset.ack);
-        await refresh();
-        toast('已确认该告警');
-      } catch (error) {
-        toast(error.message, true);
-      }
-      return;
-    }
+  tbody.addEventListener('click', (event) => {
     const row = event.target.closest('tr[data-code]');
     if (row) onOpenCode(row.dataset.code);
   });
@@ -169,11 +153,6 @@ export function createAlertsView({ toast, onOpenCode }) {
   });
   $('#alert-metric').addEventListener('change', (event) => {
     state.metric = event.target.value;
-    state.page = 0;
-    void refresh();
-  });
-  $('#alert-ack').addEventListener('change', (event) => {
-    state.acknowledged = event.target.value;
     state.page = 0;
     void refresh();
   });
@@ -209,7 +188,6 @@ export function createAlertsView({ toast, onOpenCode }) {
         limit: 500,
         severity: state.severity || undefined,
         metric: state.metric || undefined,
-        acknowledged: state.acknowledged || undefined,
         ...timeQuery(),
         code: state.code || undefined,
       });
@@ -218,7 +196,7 @@ export function createAlertsView({ toast, onOpenCode }) {
         return;
       }
       const rows = [
-        ['触发时间', '级别', 'ETF名称', 'ETF代码', '分类', '规则', '触发条件', '实测值', '状态'],
+        ['触发时间', '级别', 'ETF名称', 'ETF代码', '分类', '规则', '触发条件', '实测值'],
         ...result.rows.map((row) => [
           row.triggeredAtText ?? fmtDateTime(row.triggeredAt),
           SEVERITY_TEXT[row.severity] ?? row.severity,
@@ -232,7 +210,6 @@ export function createAlertsView({ toast, onOpenCode }) {
           row.metric === 'volume_preburst'
             ? fmtMetricValue(row.metric, row.value)
             : String(row.value),
-          row.acknowledged ? '已确认' : '未确认',
         ]),
       ];
       downloadCsv(`etf-alerts-${new Date().toISOString().slice(0, 10)}.csv`, rows);

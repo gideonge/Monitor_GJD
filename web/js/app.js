@@ -118,18 +118,17 @@ function renderKpis(data) {
     1,
   )}%</b> · 当日 ${fmtInt(market.sampleSize)} 只`;
 
-  const highCount = (alertStats.bySeverity ?? []).find((item) => item.severity === 'high')?.count ?? 0;
+  // 取消逐条确认后，副标题改为级别构成：一眼看出这批告警里有多少是「高」
+  const severityCount = (level) => (alertStats.bySeverity ?? []).find((item) => item.severity === level)?.count ?? 0;
   $('#kpi-alerts').textContent = fmtInt(alertStats.total ?? 0);
-  $('#kpi-alerts-sub').innerHTML = `未确认 <b>${fmtInt(alertStats.unacknowledged ?? 0)}</b> · 高级别 <b>${fmtInt(
-    highCount,
+  $('#kpi-alerts-sub').innerHTML = `高 <b>${fmtInt(severityCount('high'))}</b> · 中 <b>${fmtInt(
+    severityCount('medium'),
   )}</b>`;
   // 徽标口径固定为「最近交易日」，由服务端 summary.today 给出；
   // 告警历史页的列表默认也取同一范围，两处数字因此必然对得上
   const badge = $('#alert-tab-badge');
   badge.textContent = String(alertStats.total ?? 0);
-  badge.title = `最近交易日告警 ${fmtInt(alertStats.total ?? 0)} 条 · 未确认 ${fmtInt(
-    alertStats.unacknowledged ?? 0,
-  )} 条`;
+  badge.title = `最近交易日告警 ${fmtInt(alertStats.total ?? 0)} 条`;
 
   $('#kpi-coverage').textContent = `${fmtInt(coverage ?? 0)} / ${fmtInt(market.universeSize ?? 0)}`;
   $('#kpi-coverage-sub').innerHTML = `监控池 <b>${fmtInt(data.status?.trackedCount ?? 0)}</b> · 生效规则 <b>${fmtInt(

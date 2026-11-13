@@ -18,7 +18,6 @@ export function createEtfController({ services }) {
         alerts: {
           since,
           total: summary.total,
-          unacknowledged: summary.unacknowledged,
           bySeverity: summary.bySeverity,
         },
         status: {

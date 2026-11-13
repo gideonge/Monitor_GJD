@@ -32,8 +32,6 @@ export function mapAlertRow(row) {
     netFlow: row.net_flow ?? null,
     triggeredAt: row.triggered_at,
     triggeredAtText: formatDateTime(row.triggered_at),
-    acknowledged: Boolean(row.acknowledged),
-    acknowledgedAt: row.acknowledged_at,
   };
 }
 

@@ -99,7 +99,6 @@ export const api = {
 
   alerts: (params) => request(`/api/alerts${buildQuery(params)}`),
   alertSummary: () => request('/api/alerts/summary'),
-  ackAlert: (id) => request(`/api/alerts/${id}/ack`, { method: 'POST' }),
 
   rules: () => request('/api/rules'),
   createRule: (payload) => request('/api/rules', { method: 'POST', body: payload }),

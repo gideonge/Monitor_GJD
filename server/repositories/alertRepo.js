@@ -1,10 +1,13 @@
 export function createAlertRepo(db) {
+  // alert 表里仍留有 acknowledged / acknowledged_at 两列，属历史遗留：
+  // 逐条确认在每天数百条告警的规模下没有可执行性（上线后使用率 0.12%），功能已下线。
+  // 列不做 DROP —— 删列不可逆，且旧数据里还有 7 条确认记录可用于回溯；新写入一律走表默认值。
   const insert = db.prepare(`
     INSERT INTO alert
       (rule_id, rule_name, code, etf_name, category, metric, timeframe, comparator, threshold,
        value, delta, baseline, window_sec, severity, condition_text, message, dedupe_key,
-       source, trade_date, triggered_at, price_move_pct, net_flow, acknowledged, acknowledged_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL)
+       source, trade_date, triggered_at, price_move_pct, net_flow)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(rule_id, code, dedupe_key) DO NOTHING
   `);
 
@@ -50,7 +53,7 @@ export function createAlertRepo(db) {
       return row?.ts ?? null;
     },
 
-    list({ limit = 50, offset = 0, code, severity, acknowledged, metric, since } = {}) {
+    list({ limit = 50, offset = 0, code, severity, metric, since } = {}) {
       const clauses = [];
       const params = [];
       if (code) {
@@ -60,10 +63,6 @@ export function createAlertRepo(db) {
       if (severity) {
         clauses.push('severity = ?');
         params.push(severity);
-      }
-      if (acknowledged === true || acknowledged === false) {
-        clauses.push('acknowledged = ?');
-        params.push(acknowledged ? 1 : 0);
       }
       if (metric) {
         clauses.push('metric = ?');
@@ -87,12 +86,6 @@ export function createAlertRepo(db) {
         .all(limit);
     },
 
-    acknowledge(id) {
-      const result = db
-        .prepare('UPDATE alert SET acknowledged = 1, acknowledged_at = ? WHERE id = ? AND acknowledged = 0')
-        .run(Date.now(), id);
-      return Number(result.changes ?? 0) > 0;
-    },
 
     summarize({ since } = {}) {
       const scope = since ? 'WHERE triggered_at >= ?' : '';
@@ -101,14 +94,11 @@ export function createAlertRepo(db) {
         .prepare(`SELECT severity, COUNT(*) AS count FROM alert ${scope} GROUP BY severity`)
         .all(...params);
       const total = db.prepare(`SELECT COUNT(*) AS c FROM alert ${scope}`).get(...params).c;
-      const unacknowledged = db
-        .prepare(`SELECT COUNT(*) AS c FROM alert ${scope ? `${scope} AND` : 'WHERE'} acknowledged = 0`)
-        .get(...params).c;
-      return { total, unacknowledged, bySeverity };
+      return { total, bySeverity };
     },
 
     topCodes({ limit = 5, since } = {}) {
-      const scope = since ? 'WHERE triggered_at >= ? AND acknowledged = 0' : 'WHERE acknowledged = 0';
+      const scope = since ? 'WHERE triggered_at >= ?' : '';
       const params = since ? [since] : [];
       return db
         .prepare(`SELECT code, etf_name, COUNT(*) AS count FROM alert ${scope} GROUP BY code ORDER BY count DESC LIMIT ?`)

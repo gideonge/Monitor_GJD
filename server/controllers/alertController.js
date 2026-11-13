@@ -1,7 +1,6 @@
 import { sendJson } from '../lib/http.js';
 import { mapAlertRow } from '../lib/serialize.js';
-import { notFound } from '../lib/errors.js';
-import { optionalInt, optionalEnum, optionalString, requireInt } from '../lib/validate.js';
+import { optionalInt, optionalEnum, optionalString } from '../lib/validate.js';
 import { SEVERITIES, METRICS } from '../repositories/ruleRepo.js';
 import { recentSessionStart } from '../lib/time.js';
 
@@ -27,23 +26,12 @@ export function createAlertController({ services }) {
       const severity = optionalEnum(query.get('severity'), 'severity', SEVERITIES);
       const metric = optionalEnum(query.get('metric'), 'metric', Object.keys(METRICS));
       const code = optionalString(query.get('code'), 'code', { max: 12 });
-      const ackParam = query.get('acknowledged');
-      const acknowledged =
-        ackParam === 'true' || ackParam === '1' ? true : ackParam === 'false' || ackParam === '0' ? false : undefined;
       const sinceHours = optionalInt(query.get('sinceHours'), 'sinceHours', { min: 1, max: 8760 });
       const range = optionalEnum(query.get('range'), 'range', RANGES);
       // 两条时间条件互斥：range 走「当日」口径，sinceHours 走滚动窗口
       const since = range === 'today' ? sessionStart(ctx) : sinceHours ? Date.now() - sinceHours * 3600 * 1000 : undefined;
 
-      const { rows, total } = repos.alertRepo.list({
-        limit,
-        offset,
-        code,
-        severity,
-        metric,
-        acknowledged,
-        since,
-      });
+      const { rows, total } = repos.alertRepo.list({ limit, offset, code, severity, metric, since });
 
       sendJson(ctx.res, 200, {
         rows: rows.map(mapAlertRow),
@@ -70,18 +58,6 @@ export function createAlertController({ services }) {
         recent: repos.alertRepo.recent(8).map(mapAlertRow),
         generatedAt: Date.now(),
       });
-    },
-
-    ack(ctx) {
-      const id = requireInt(ctx.params.id, 'id', { min: 1 });
-      const ok = repos.alertRepo.acknowledge(id);
-      if (!ok) {
-        const existing = repos.alertRepo.getById(id);
-        if (!existing) throw notFound(`告警不存在：${id}`);
-        sendJson(ctx.res, 200, { ok: true, alreadyAcknowledged: true, alert: mapAlertRow(existing) });
-        return;
-      }
-      sendJson(ctx.res, 200, { ok: true, alert: mapAlertRow(repos.alertRepo.getById(id)) });
     },
   };
 }

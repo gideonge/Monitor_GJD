@@ -29,7 +29,6 @@ export function buildRouter({ services }) {
 
   router.get('/api/alerts', alert.list);
   router.get('/api/alerts/summary', alert.summary);
-  router.post('/api/alerts/:id/ack', alert.ack);
 
   router.get('/api/rules', rule.list);
   router.post('/api/rules', rule.create);

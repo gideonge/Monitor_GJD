@@ -206,7 +206,6 @@ export function persistAlerts({ candidates, alertRepo, events, logger, source = 
       triggeredAt: candidate.triggeredAt,
       triggeredAtText: formatDateTime(candidate.triggeredAt),
       source,
-      acknowledged: 0,
     };
 
     created.push(alert);
@@ -326,7 +325,6 @@ export function persistSurgeAlerts({ candidates, alertRepo, events, logger, para
       triggeredAt: event.ts,
       triggeredAtText: formatDateTime(event.ts),
       source,
-      acknowledged: 0,
       // 供前端标注分时图使用
       minute: event.minute,
       level: event.level,
@@ -445,7 +443,6 @@ export function persistTickImpulseAlerts({ candidates, alertRepo, events, logger
       triggeredAt: episode.startTs,
       triggeredAtText: formatDateTime(episode.startTs),
       source,
-      acknowledged: 0,
       // 供前端标注秒级图与筛选使用
       direction: episode.direction,
       level: episode.level,
@@ -579,7 +576,6 @@ export function persistPreburstAlerts({ candidates, alertRepo, events, logger, p
       triggeredAt: evaluation.lastTs,
       triggeredAtText: formatDateTime(evaluation.lastTs),
       source,
-      acknowledged: 0,
       // 供前端做「进行中」标注：这条记录对应的是某一分钟的实时推演，不是定稿
       minute: evaluation.minute,
       level: evaluation.level,

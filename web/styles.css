@@ -546,6 +546,25 @@ table.data tbody td.wrap {
   min-width: 220px;
 }
 
+/* 告警历史：行底色与左侧细条同样只表示方向，与右侧实时告警卡共用一套语义。
+   底色 6% 混合（文字对比度不变），悬停加深到 12%；首列内阴影当色条用，
+   不占布局宽度，也不会把表格撑歪。 */
+#alert-table tbody tr.dir-in { background: var(--in-tint); }
+#alert-table tbody tr.dir-in:hover { background: var(--in-tint-hover); }
+#alert-table tbody tr.dir-out { background: var(--out-tint); }
+#alert-table tbody tr.dir-out:hover { background: var(--out-tint-hover); }
+#alert-table tbody tr.dir-in td:first-child { box-shadow: inset 3px 0 0 var(--in); }
+#alert-table tbody tr.dir-out td:first-child { box-shadow: inset 3px 0 0 var(--out); }
+
+/* 倍数后面的方向依据（+0.12% / 净买 3200万），比正文小一号。
+   带 .num-in/.num-out 是为了跟数值同色；权重写死 500，免得被 .num-* 的 600 压成一样粗 */
+.row-move {
+  margin-left: 4px;
+  font-size: 10.5px;
+}
+.row-move.num-in { color: var(--in); font-weight: 500; }
+.row-move.num-out { color: var(--out); font-weight: 500; }
+
 .cell-code {
   font-family: var(--mono);
   color: var(--ink-2);

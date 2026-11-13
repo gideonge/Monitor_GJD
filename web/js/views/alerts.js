@@ -1,12 +1,15 @@
 import { api } from '../api.js';
 import {
   $,
+  alertDirection,
   debounce,
   downloadCsv,
   escapeHtml,
+  fmtAmount,
   fmtDateTime,
   fmtInt,
   fmtMetricValue,
+  fmtSignedPct,
 } from '../format.js';
 
 const SEVERITY_TEXT = { high: '高', medium: '中', low: '低' };
@@ -56,23 +59,35 @@ export function createAlertsView({ toast, onOpenCode }) {
       tbody.innerHTML = state.rows
         .map((row) => {
           const valueText = fmtMetricValue(row.metric, row.value);
-          // 量能突变的数值是倍数，红绿会误导成资金方向，统一用中性色
+          // 倍数是「多大」，方向要看价格涨跌幅（没动时看主动净买额），
+          // 判定与右侧实时告警卡同一套逻辑，避免同一波行情两处颜色不一样
+          const { dir, evidence } = alertDirection({
+            metric: row.metric,
+            value: row.value,
+            priceMovePct: row.priceMovePct,
+            netFlow: row.netFlow,
+          });
           const valueColor =
-            row.metric === 'volume_surge' || row.metric === 'volume_preburst'
-              ? 'var(--ink)'
-              : row.value > 0
-                ? 'var(--in)'
-                : row.value < 0
-                  ? 'var(--out)'
-                  : 'var(--muted)';
-          return `<tr data-id="${row.id}" data-code="${escapeHtml(row.code)}">
+            dir === 'dir-in' ? 'var(--in)' : dir === 'dir-out' ? 'var(--out)' : 'var(--muted)';
+          // 倍数后面补方向依据，行底色才有解释（+0.12% / 净买 3200万）
+          const moveCls = dir === 'dir-in' ? 'num-in' : 'num-out';
+          const moveText =
+            evidence === 'price'
+              ? `<span class="row-move ${moveCls}">${fmtSignedPct(row.priceMovePct)}</span>`
+              : evidence === 'net'
+                ? `<span class="row-move ${moveCls}">${Number(row.netFlow) > 0 ? '净买' : '净卖'} ${fmtAmount(
+                    Math.abs(Number(row.netFlow)),
+                    { sign: false },
+                  )}</span>`
+                : '';
+          return `<tr class="${dir}" data-id="${row.id}" data-code="${escapeHtml(row.code)}">
             <td class="mono" style="color:var(--ink-2)">${escapeHtml(row.triggeredAtText ?? fmtDateTime(row.triggeredAt))}</td>
             <td><span class="tag ${row.severity}">${SEVERITY_TEXT[row.severity] ?? row.severity}</span></td>
             <td>
               <span class="cell-name">${escapeHtml(row.etfName)}</span>
               <span class="cell-code">${escapeHtml(row.code)}</span>
             </td>
-            <td class="num" style="color:${valueColor}">${valueText}</td>
+            <td class="num" style="color:${valueColor}">${valueText}${moveText}</td>
             <td class="wrap" style="color:var(--ink-2)">${escapeHtml(row.conditionText)}</td>
             <td style="color:var(--muted)">${escapeHtml(row.ruleName)}</td>
           </tr>`;

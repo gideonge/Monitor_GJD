@@ -208,7 +208,7 @@ npm test
 | GET | `/api/flows/ranking?direction=inflow\|outflow&limit=&metric=` | 排行榜；`metric` 可选 `net`（主口径，默认）/ `mainNet`（主力净额）/ `activeNet`（主动净买） |
 | GET | `/api/flows/categories` | 分类资金流聚合 |
 | POST | `/api/sync` | 手动触发采集 `{ scope: "tick"\|"universe"\|"daily"\|"intraday"\|"surge"\|"fast"\|"impulse" }`（`surge` = 刷新盘中分时 + 扫描量能突变；`fast` = 强制一次秒级采样；`impulse` = 秒级攻势扫描，非交易时段需 `force: true`） |
-| GET | `/api/alerts?limit=&offset=&severity=&acknowledged=&code=&sinceHours=` | 告警历史 |
+| GET | `/api/alerts?limit=&offset=&severity=&acknowledged=&code=&range=&sinceHours=` | 告警历史。`range=today` 取「最近交易日」窗口，与总览告警数、徽标同口径；`sinceHours` 为滚动窗口，两者互斥，`range` 优先 |
 | GET | `/api/alerts/summary` | 告警统计与最近记录 |
 | POST | `/api/alerts/:id/ack` | 确认告警 |
 | GET | `/api/rules` | 规则列表 |

@@ -123,7 +123,13 @@ function renderKpis(data) {
   $('#kpi-alerts-sub').innerHTML = `未确认 <b>${fmtInt(alertStats.unacknowledged ?? 0)}</b> · 高级别 <b>${fmtInt(
     highCount,
   )}</b>`;
-  $('#alert-tab-badge').textContent = String(alertStats.total ?? 0);
+  // 徽标口径固定为「最近交易日」，由服务端 summary.today 给出；
+  // 告警历史页的列表默认也取同一范围，两处数字因此必然对得上
+  const badge = $('#alert-tab-badge');
+  badge.textContent = String(alertStats.total ?? 0);
+  badge.title = `最近交易日告警 ${fmtInt(alertStats.total ?? 0)} 条 · 未确认 ${fmtInt(
+    alertStats.unacknowledged ?? 0,
+  )} 条`;
 
   $('#kpi-coverage').textContent = `${fmtInt(coverage ?? 0)} / ${fmtInt(market.universeSize ?? 0)}`;
   $('#kpi-coverage-sub').innerHTML = `监控池 <b>${fmtInt(data.status?.trackedCount ?? 0)}</b> · 生效规则 <b>${fmtInt(

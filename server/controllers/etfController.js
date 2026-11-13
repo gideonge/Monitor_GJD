@@ -1,6 +1,6 @@
 import { sendJson, readJsonBody } from '../lib/http.js';
 import { optionalInt, requireEnum, optionalString, requireEtfCode } from '../lib/validate.js';
-import { tradeDateStartTs, tradeDateOf, shanghaiParts } from '../lib/time.js';
+import { tradeDateStartTs, tradeDateOf, shanghaiParts, recentSessionStart } from '../lib/time.js';
 import { badRequest } from '../lib/errors.js';
 
 export function createEtfController({ services }) {
@@ -10,10 +10,8 @@ export function createEtfController({ services }) {
     overview(ctx) {
       const overview = queryService.overview();
       const status = marketService.getStatus();
-      // 日度告警的触发时间落在交易日 15:00，因此统计窗口取「今日 0 点」与「最近交易日 0 点」的较早者
-      const since = status.lastTradeDate
-        ? Math.min(ctx.todayStart, tradeDateStartTs(status.lastTradeDate))
-        : ctx.todayStart;
+      // 统计窗口取「今日 0 点」与「最近交易日 0 点」的较早者，口径见 recentSessionStart
+      const since = recentSessionStart({ todayStart: ctx.todayStart, lastTradeDate: status.lastTradeDate });
       const summary = services.repos.alertRepo.summarize({ since });
       sendJson(ctx.res, 200, {
         ...overview,

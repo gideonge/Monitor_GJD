@@ -5,10 +5,14 @@ import {
   downloadCsv,
   escapeHtml,
   fmtDateTime,
+  fmtInt,
   fmtMetricValue,
 } from '../format.js';
 
 const SEVERITY_TEXT = { high: '高', medium: '中', low: '低' };
+
+/** 时间范围的中文标签，与 #alert-range 的取值一一对应 */
+const RANGE_TEXT = { today: '最近交易日', '': '全部时间', 24: '最近 24 小时', 72: '最近 3 天', 168: '最近 7 天' };
 
 export function createAlertsView({ toast, onOpenCode }) {
   const state = {
@@ -17,14 +21,34 @@ export function createAlertsView({ toast, onOpenCode }) {
     severity: '',
     metric: '',
     acknowledged: '',
-    sinceHours: '',
+    // 时间范围直接存控件的原始取值：'today' / '' / '24' / '72' / '168'
+    // 默认「最近交易日」：与顶部徽标、KPI 卡同一个口径，避免「徽标 204 / 列表 5680」这种对不上的情况
+    range: 'today',
     code: '',
     rows: [],
     total: 0,
+    sessionTotal: 0,
     loading: false,
   };
 
   const tbody = $('#alert-table tbody');
+
+  /** 除时间范围外，是否还叠加了别的筛选 */
+  function hasExtraFilters() {
+    return Boolean(state.severity || state.metric || state.acknowledged || state.code);
+  }
+
+  /** 时间范围 → 请求参数：range=today 由服务端按「最近交易日」换算，其余走滚动小时数 */
+  function timeQuery() {
+    if (state.range === 'today') return { range: 'today' };
+    if (!state.range) return {};
+    return { sinceHours: state.range };
+  }
+
+  function scopeText() {
+    const range = state.range === 'today' ? RANGE_TEXT.today : RANGE_TEXT[state.range] ?? RANGE_TEXT[''];
+    return hasExtraFilters() ? `${range} · 已筛选` : range;
+  }
 
   function renderRows() {
     if (state.rows.length === 0) {
@@ -60,11 +84,16 @@ export function createAlertsView({ toast, onOpenCode }) {
     }
 
     const totalPages = Math.max(1, Math.ceil(state.total / state.pageSize));
-    $('#alert-count').textContent = `共 ${state.total} 条告警`;
+    // 列表条数只说明「当前筛选下有多少」，必须把范围写在旁边：
+    // 只写「共 N 条」，读者会把筛选后的数与徽标（最近交易日）当成同一个统计口径
+    $('#alert-count').textContent = `共 ${fmtInt(state.total)} 条 · ${scopeText()}`;
     $('#alert-page').textContent = `第 ${state.page + 1} / ${totalPages} 页`;
     $('#alert-prev').disabled = state.page === 0;
     $('#alert-next').disabled = state.page + 1 >= totalPages;
-    $('#alert-tab-badge').textContent = String(state.total);
+    // 徽标的数由服务端的 summary.today 给出（今日 0 点与最近交易日 0 点的较早者），
+    // 与总览 KPI、列表默认范围同源，不再用 state.total 覆盖
+    $('#alert-tab-badge').textContent = String(state.sessionTotal);
+    $('#alert-tab-badge').title = `最近交易日告警 ${fmtInt(state.sessionTotal)} 条（当前列表：${fmtInt(state.total)} 条 · ${scopeText()}）`;
   }
 
   let metricsLoaded = false;
@@ -91,17 +120,23 @@ export function createAlertsView({ toast, onOpenCode }) {
     state.loading = true;
     await ensureMetricOptions();
     try {
-      const result = await api.alerts({
-        limit: state.pageSize,
-        offset: state.page * state.pageSize,
-        severity: state.severity || undefined,
-        metric: state.metric || undefined,
-        acknowledged: state.acknowledged || undefined,
-        sinceHours: state.sinceHours || undefined,
-        code: state.code || undefined,
-      });
+      // 列表与徽标并行取：徽标要的是「最近交易日总数」，与当前筛选无关，
+      // 用列表的 total 充当徽标就会出现「徽标随筛选变化」的错觉
+      const [result, summary] = await Promise.all([
+        api.alerts({
+          limit: state.pageSize,
+          offset: state.page * state.pageSize,
+          severity: state.severity || undefined,
+          metric: state.metric || undefined,
+          acknowledged: state.acknowledged || undefined,
+          ...timeQuery(),
+          code: state.code || undefined,
+        }),
+        api.alertSummary().catch(() => null),
+      ]);
       state.rows = result.rows;
       state.total = result.total;
+      state.sessionTotal = summary?.today?.total ?? state.sessionTotal;
       renderRows();
     } catch (error) {
       tbody.innerHTML = `<tr><td colspan="8"><div class="empty">加载失败：${escapeHtml(error.message)}</div></td></tr>`;
@@ -143,7 +178,7 @@ export function createAlertsView({ toast, onOpenCode }) {
     void refresh();
   });
   $('#alert-range').addEventListener('change', (event) => {
-    state.sinceHours = event.target.value;
+    state.range = event.target.value;
     state.page = 0;
     void refresh();
   });
@@ -175,7 +210,7 @@ export function createAlertsView({ toast, onOpenCode }) {
         severity: state.severity || undefined,
         metric: state.metric || undefined,
         acknowledged: state.acknowledged || undefined,
-        sinceHours: state.sinceHours || undefined,
+        ...timeQuery(),
         code: state.code || undefined,
       });
       if (result.rows.length === 0) {

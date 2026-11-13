@@ -96,6 +96,19 @@ export function todayStartTs(timestamp = Date.now()) {
   return tradeDateStartTs(tradeDateOf(timestamp));
 }
 
+/**
+ * 「当前这批数据」的统计窗口起点：今日 0 点与最近交易日 0 点的较早者。
+ *
+ * 日度告警的 triggeredAt 落在交易日 15:00，所以第二天开盘前如果只取今日 0 点，
+ * 昨天收盘那批日度告警会整批从「告警数」里消失。这个口径原先写死在
+ * etfController.overview 里，告警历史页另算一套，导致同一屏出现两个数（徽标 204、
+ * 列表 5680）。收敛到这里，谁要统计「当日」都调它，不再各算各的。
+ */
+export function recentSessionStart({ todayStart, lastTradeDate } = {}) {
+  if (!lastTradeDate) return todayStart;
+  return Math.min(todayStart, tradeDateStartTs(lastTradeDate));
+}
+
 /** 交易日 + 北京时间 HH:MM → 毫秒时间戳 */
 export function beijingTs(tradeDate, hhmm) {
   const [year, month, day] = tradeDate.split('-').map(Number);

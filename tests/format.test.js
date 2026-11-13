@@ -1,7 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { alertDirection, flowDirectionClass } from '../web/js/format.js';
+import {
+  alertDirection,
+  compareAlertsDesc,
+  flowDirectionClass,
+  insertAlertSorted,
+} from '../web/js/format.js';
 
 /**
  * 告警卡片的基础色（底色 + 左侧色条）只表示方向，不表示级别。
@@ -82,4 +87,46 @@ test('资金类指标不受价格 / 净额参数影响，方向仍只看 value',
 test('级别不参与方向判定：同一正数不论级别都得到同一方向', () => {
   assert.equal(flowDirectionClass('main_net_delta', 30_000_000), 'dir-in');
   assert.equal(flowDirectionClass('main_net_delta', -30_000_000), 'dir-out');
+});
+
+/**
+ * 实时告警流的排序：按触发时间倒序，不按到达顺序。
+ *
+ * 量能类告警是整分钟 K 线收完后批量扫描的，14:57 才产出 14:55 那条，
+ * 一旦按到达顺序 unshift，列表就会出现「14:47 在 14:55 上面」。
+ */
+const alertAt = (id, time) => ({ id, triggeredAt: Date.parse(`2026-11-13T${time}+08:00`) });
+
+test('按触发时间倒序，同一分钟按 id 倒序', () => {
+  const a = alertAt(1, '14:55:00');
+  const b = alertAt(2, '14:47:30');
+  const c = alertAt(3, '14:55:00');
+  assert.deepEqual([a, b, c].sort(compareAlertsDesc).map((x) => x.id), [3, 1, 2]);
+});
+
+test('迟到的旧告警插到它该在的位置，而不是顶部', () => {
+  const list = [alertAt(3, '14:56:57'), alertAt(2, '14:55:00'), alertAt(1, '14:47:30')];
+  const { items, index } = insertAlertSorted(list, alertAt(4, '14:55:00'));
+  assert.equal(index, 1, '与 14:55 同刻时，id 更大的排在前面');
+  assert.deepEqual(items.map((x) => x.id), [3, 4, 2, 1]);
+});
+
+test('最新的告警插到第一位', () => {
+  const list = [alertAt(1, '14:55:00')];
+  const { items, index } = insertAlertSorted(list, alertAt(2, '14:56:00'));
+  assert.equal(index, 0);
+  assert.deepEqual(items.map((x) => x.id), [2, 1]);
+});
+
+test('重复推送同一 id 时忽略，避免快照与事件双写', () => {
+  const list = [alertAt(1, '14:55:00')];
+  const result = insertAlertSorted(list, alertAt(1, '14:55:00'));
+  assert.equal(result.index, -1);
+  assert.equal(result.items, list);
+});
+
+test('超过上限时丢弃最旧的一条', () => {
+  const list = [alertAt(3, '14:56:00'), alertAt(2, '14:55:00'), alertAt(1, '14:54:00')];
+  const { items } = insertAlertSorted(list, alertAt(4, '14:57:00'), 3);
+  assert.deepEqual(items.map((x) => x.id), [4, 3, 2]);
 });

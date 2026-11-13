@@ -3,6 +3,7 @@ import {
   $,
   $$,
   alertDirection,
+  compareAlertsDesc,
   debounce,
   escapeHtml,
   fmtAmount,
@@ -11,6 +12,7 @@ import {
   fmtInt,
   fmtMetricValue,
   fmtSignedPct,
+  insertAlertSorted,
   signClass,
 } from './format.js';
 import { createRankingView } from './views/ranking.js';
@@ -285,9 +287,13 @@ function alertCardHtml(alert, isNew = false) {
   </div>`;
 }
 
+/** 实时流最多保留多少条：够看当前节奏，又不至于把右侧栏撑成日志 */
+const LIVE_LIMIT = 30;
+
 function renderLiveStream(items) {
   liveItems.length = 0;
-  liveItems.push(...items);
+  // 服务端已按 triggered_at 倒序返回，这里再排一次是为了兜住「快照 + 事件」混排
+  liveItems.push(...[...items].sort(compareAlertsDesc).slice(0, LIVE_LIMIT));
   const container = $('#live-stream');
   if (liveItems.length === 0) {
     container.innerHTML = '<div class="empty">暂无告警。命中阈值规则后将在这里实时推送。</div>';
@@ -297,13 +303,28 @@ function renderLiveStream(items) {
   $('#live-count').textContent = String(liveItems.length);
 }
 
+/**
+ * 新告警按「触发时间」插到正确位置，而不是一律插到顶部。
+ *
+ * 量能类告警是整分钟 K 线收完后批量扫描出来的：14:57 那一轮会产出 14:55 的告警，
+ * 一律 unshift 就会出现「14:47 排在 14:55 上面」。这里按 triggeredAt 找位置，
+ * 顺带忽略重复 id（SSE 快照与事件可能同一条）。
+ */
 function prependAlert(alert) {
-  liveItems.unshift(alert);
-  if (liveItems.length > 30) liveItems.length = 30;
+  const { items, index } = insertAlertSorted(liveItems, alert, LIVE_LIMIT);
+  if (index === -1) return;
+
   const container = $('#live-stream');
-  if (liveItems.length === 1) container.innerHTML = '';
-  container.insertAdjacentHTML('afterbegin', alertCardHtml(alert, true));
-  while (container.children.length > 30) container.lastElementChild.remove();
+  const before = liveItems.length;
+  liveItems.splice(0, liveItems.length, ...items);
+  if (before === 0) container.innerHTML = '';
+
+  const reference = container.children[index] ?? null;
+  const html = alertCardHtml(alert, true);
+  if (reference) reference.insertAdjacentHTML('beforebegin', html);
+  else container.insertAdjacentHTML('beforeend', html);
+  // 超出上限时，列表末尾被裁掉的那条在 DOM 里也要移除
+  while (container.children.length > LIVE_LIMIT) container.lastElementChild.remove();
   $('#live-count').textContent = String(liveItems.length);
   // 量能突变的中/弱信号一天有上百条，逐条弹提示会变成骚扰：只弹强信号。
   // 其它指标维持原有行为（命中即弹），避免改动既有使用习惯。

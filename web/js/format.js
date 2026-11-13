@@ -139,6 +139,34 @@ export function flowDirectionClass(metric, value, priceMovePct = null, netFlow =
   return alertDirection({ metric, value, priceMovePct, netFlow }).dir;
 }
 
+/**
+ * 告警流的排序：触发时间倒序，同一时刻按 id 倒序。
+ *
+ * 不能按「到达顺序」排：量能类告警是整分钟 K 线收完后批量扫描出来的，
+ * 14:57 扫描时才产出 14:55 那条，到达顺序与触发时间天然不一致。
+ * 直接往前插就会出现「14:47 在 14:55 上面」这种看着像乱序的列表。
+ */
+export function compareAlertsDesc(a, b) {
+  const ta = Number(a.triggeredAt) || 0;
+  const tb = Number(b.triggeredAt) || 0;
+  if (ta !== tb) return tb - ta;
+  return (Number(b.id) || 0) - (Number(a.id) || 0);
+}
+
+/**
+ * 把一条告警插进已按触发时间倒序的列表，返回新列表与插入位置。
+ *
+ * - 同一 id 重复推送（SSE 的 hello 快照与后续事件可能重叠）直接忽略，index 返回 -1
+ * - 超出 limit 时丢弃列表末尾最旧的一条，避免长跑后无限增长
+ */
+export function insertAlertSorted(items, alert, limit = 30) {
+  if (items.some((item) => item.id === alert.id)) return { items, index: -1 };
+  const found = items.findIndex((item) => compareAlertsDesc(alert, item) < 0);
+  const index = found === -1 ? items.length : found;
+  const next = [...items.slice(0, index), alert, ...items.slice(index)].slice(0, limit);
+  return { items: next, index: index < limit ? index : -1 };
+}
+
 export function debounce(fn, wait = 250) {
   let timer = null;
   return (...args) => {
